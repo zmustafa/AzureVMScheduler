@@ -1,0 +1,20 @@
+# Normalise line endings so the repository is identical on Windows, macOS and Linux.
+* text=auto eol=lf
+
+# Windows-only helpers keep CRLF.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Never touch binaries.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.db binary
+
+# Generated / vendored files: keep them out of diffs and language stats.
+deploy/main.json linguist-generated=true
+frontend/package-lock.json linguist-generated=true

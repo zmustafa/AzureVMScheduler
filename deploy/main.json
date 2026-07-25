@@ -1,0 +1,680 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.44.1.10279",
+      "templateHash": "4582342369116669221"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "westus3",
+      "metadata": {
+        "description": "Azure region for all resources. Defaults to westus3, which is validated for PostgreSQL Flexible Server B1ms and Azure Container Apps."
+      }
+    },
+    "appName": {
+      "type": "string",
+      "defaultValue": "azure-vm-scheduler",
+      "minLength": 3,
+      "maxLength": 40,
+      "metadata": {
+        "description": "Base name for the Azure VM Scheduler deployment. Use lowercase letters, numbers, and hyphens."
+      }
+    },
+    "containerImage": {
+      "type": "string",
+      "defaultValue": "docker.io/zmustafa/azure-vm-scheduler:latest",
+      "metadata": {
+        "description": "Container image to deploy. Defaults to the public Docker Hub image, :latest tag, so the one-click button always provisions the newest published release."
+      }
+    },
+    "registryServer": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Private registry login server (for example myregistry.azurecr.io). Leave empty to pull the public image anonymously."
+      }
+    },
+    "registryUsername": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Username for the private registry. Ignored when Registry server is empty."
+      }
+    },
+    "registryPassword": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Password or token for the private registry. Ignored when Registry server is empty."
+      }
+    },
+    "adminUsername": {
+      "type": "string",
+      "defaultValue": "admin",
+      "minLength": 3,
+      "metadata": {
+        "description": "Bootstrap local admin username for first login."
+      }
+    },
+    "adminPassword": {
+      "type": "securestring",
+      "minLength": 12,
+      "metadata": {
+        "description": "Bootstrap local admin password for first login. You are forced to change it after first sign-in."
+      }
+    },
+    "postgresAdminLogin": {
+      "type": "string",
+      "defaultValue": "vmschedadmin",
+      "minLength": 3,
+      "maxLength": 63,
+      "metadata": {
+        "description": "PostgreSQL administrator username."
+      }
+    },
+    "postgresAdminPassword": {
+      "type": "securestring",
+      "defaultValue": "[format('Vmsch!{0}2026', uniqueString(subscription().id, resourceGroup().id, parameters('appName')))]",
+      "minLength": 16,
+      "metadata": {
+        "description": "Auto-generated PostgreSQL administrator password. Leave unchanged unless you need to supply your own."
+      }
+    },
+    "postgresDatabaseName": {
+      "type": "string",
+      "defaultValue": "azureops",
+      "minLength": 1,
+      "maxLength": 63,
+      "metadata": {
+        "description": "PostgreSQL database name used by the app."
+      }
+    },
+    "postgresSkuName": {
+      "type": "string",
+      "defaultValue": "Standard_B1ms",
+      "metadata": {
+        "description": "PostgreSQL Flexible Server SKU. B1ms is the lowest-cost managed option for this template."
+      }
+    },
+    "containerCpu": {
+      "type": "string",
+      "defaultValue": "0.5",
+      "metadata": {
+        "description": "Container CPU cores."
+      }
+    },
+    "containerMemory": {
+      "type": "string",
+      "defaultValue": "1Gi",
+      "allowedValues": [
+        "1Gi",
+        "2Gi"
+      ],
+      "metadata": {
+        "description": "Container memory allocation."
+      }
+    },
+    "enableRealAzureStarts": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Allow the scheduler to start REAL Azure virtual machines. Leave false to run every wave in mock mode until you have reviewed the estate."
+      }
+    },
+    "enableRealAzureStops": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Allow the scheduler to stop REAL Azure virtual machines. Deliberately separate from starts: a wrong start costs money, a wrong stop causes an outage."
+      }
+    },
+    "privateNetworking": {
+      "type": "string",
+      "defaultValue": "No",
+      "allowedValues": [
+        "No",
+        "Yes"
+      ],
+      "metadata": {
+        "description": "Deploy backing storage AND PostgreSQL behind Private Endpoints inside a VNet (Yes) or use the simple public deployment (No). Create-time choice; cannot be toggled later."
+      }
+    },
+    "vnetAddressSpace": {
+      "type": "string",
+      "defaultValue": "10.44.0.0/22",
+      "metadata": {
+        "description": "VNet address space (CIDR), used only when Private networking = Yes. Pick a range that does not overlap your existing networks."
+      }
+    },
+    "infraSubnetPrefix": {
+      "type": "string",
+      "defaultValue": "10.44.0.0/23",
+      "metadata": {
+        "description": "Infrastructure subnet (CIDR) for the Container Apps Environment. Must be at least a /23 and inside the VNet address space. Used only when Private networking = Yes."
+      }
+    },
+    "privateEndpointSubnetPrefix": {
+      "type": "string",
+      "defaultValue": "10.44.2.0/27",
+      "metadata": {
+        "description": "Private Endpoint subnet (CIDR) for the storage and PostgreSQL private endpoints. Must be inside the VNet address space and not overlap the infrastructure subnet. Used only when Private networking = Yes."
+      }
+    }
+  },
+  "variables": {
+    "usePrivateRegistry": "[not(empty(parameters('registryServer')))]",
+    "isPrivate": "[equals(parameters('privateNetworking'), 'Yes')]",
+    "normalizedAppName": "[toLower(parameters('appName'))]",
+    "unique": "[uniqueString(resourceGroup().id, variables('normalizedAppName'))]",
+    "compactAppName": "[replace(variables('normalizedAppName'), '-', '')]",
+    "namePrefix": "[substring(variables('compactAppName'), 0, min(length(variables('compactAppName')), 14))]",
+    "workspaceName": "[format('{0}-law-{1}', variables('namePrefix'), variables('unique'))]",
+    "environmentName": "[format('{0}-env-{1}', variables('namePrefix'), variables('unique'))]",
+    "containerAppName": "[format('{0}-app-{1}', variables('namePrefix'), variables('unique'))]",
+    "storageAccountName": "[toLower(replace(format('vmsched{0}', variables('unique')), '-', ''))]",
+    "fileShareName": "appdata",
+    "managedEnvStorageName": "appdata",
+    "postgresServerName": "[format('{0}-pg-{1}', variables('namePrefix'), variables('unique'))]",
+    "vnetName": "[format('{0}-vnet-{1}', variables('namePrefix'), variables('unique'))]",
+    "infraSubnetName": "snet-infra",
+    "peSubnetName": "snet-pe",
+    "infraSubnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('infraSubnetName'))]",
+    "peSubnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('peSubnetName'))]",
+    "filePrivateDnsZoneName": "[format('privatelink.file.{0}', environment().suffixes.storage)]",
+    "storageFilePeName": "[format('{0}-file-pe', variables('storageAccountName'))]",
+    "postgresPrivateDnsZoneName": "privatelink.postgres.database.azure.com",
+    "postgresPeName": "[format('{0}-pe', variables('postgresServerName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "[variables('workspaceName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30,
+        "features": {
+          "enableLogAccessUsingOnlyResourcePermissions": true
+        }
+      }
+    },
+    {
+      "condition": "[variables('isPrivate')]",
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2023-11-01",
+      "name": "[variables('vnetName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "[parameters('vnetAddressSpace')]"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "[variables('infraSubnetName')]",
+            "properties": {
+              "addressPrefix": "[parameters('infraSubnetPrefix')]",
+              "delegations": [
+                {
+                  "name": "aca-delegation",
+                  "properties": {
+                    "serviceName": "Microsoft.App/environments"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "[variables('peSubnetName')]",
+            "properties": {
+              "addressPrefix": "[parameters('privateEndpointSubnetPrefix')]",
+              "privateEndpointNetworkPolicies": "Disabled"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('environmentName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName')), '2023-09-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName')), '2023-09-01').primarySharedKey]"
+          }
+        },
+        "vnetConfiguration": "[if(variables('isPrivate'), createObject('infrastructureSubnetId', variables('infraSubnetId')), null())]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('storageAccountName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "kind": "StorageV2",
+      "properties": {
+        "minimumTlsVersion": "TLS1_2",
+        "allowBlobPublicAccess": false,
+        "allowSharedKeyAccess": true,
+        "supportsHttpsTrafficOnly": true,
+        "publicNetworkAccess": "[if(variables('isPrivate'), 'Disabled', 'Enabled')]",
+        "networkAcls": "[if(variables('isPrivate'), createObject('defaultAction', 'Deny', 'bypass', 'AzureServices'), createObject('defaultAction', 'Allow', 'bypass', 'AzureServices'))]"
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}/{1}', variables('storageAccountName'), 'default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}/{1}/{2}', variables('storageAccountName'), 'default', variables('fileShareName'))]",
+      "properties": {
+        "shareQuota": 16
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/fileServices', variables('storageAccountName'), 'default')]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments/storages",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}/{1}', variables('environmentName'), variables('managedEnvStorageName'))]",
+      "properties": {
+        "azureFile": {
+          "accountName": "[variables('storageAccountName')]",
+          "accountKey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')), '2023-05-01').keys[0].value]",
+          "shareName": "[variables('fileShareName')]",
+          "accessMode": "ReadWrite"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', variables('environmentName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts/fileServices/shares', variables('storageAccountName'), 'default', variables('fileShareName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+      ]
+    },
+    {
+      "condition": "[variables('isPrivate')]",
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2020-06-01",
+      "name": "[variables('filePrivateDnsZoneName')]",
+      "location": "global"
+    },
+    {
+      "condition": "[variables('isPrivate')]",
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2020-06-01",
+      "name": "[format('{0}/{1}', variables('filePrivateDnsZoneName'), format('{0}-link', variables('vnetName')))]",
+      "location": "global",
+      "properties": {
+        "registrationEnabled": false,
+        "virtualNetwork": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('filePrivateDnsZoneName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ]
+    },
+    {
+      "condition": "[variables('isPrivate')]",
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2023-11-01",
+      "name": "[variables('storageFilePeName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "subnet": {
+          "id": "[variables('peSubnetId')]"
+        },
+        "privateLinkServiceConnections": [
+          {
+            "name": "file",
+            "properties": {
+              "privateLinkServiceId": "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]",
+              "groupIds": [
+                "file"
+              ]
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ]
+    },
+    {
+      "condition": "[variables('isPrivate')]",
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2023-11-01",
+      "name": "[format('{0}/{1}', variables('storageFilePeName'), 'default')]",
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "file",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('filePrivateDnsZoneName'))]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('filePrivateDnsZoneName'))]",
+        "[resourceId('Microsoft.Network/privateDnsZones/virtualNetworkLinks', variables('filePrivateDnsZoneName'), format('{0}-link', variables('vnetName')))]",
+        "[resourceId('Microsoft.Network/privateEndpoints', variables('storageFilePeName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.DBforPostgreSQL/flexibleServers",
+      "apiVersion": "2024-08-01",
+      "name": "[variables('postgresServerName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "[parameters('postgresSkuName')]",
+        "tier": "Burstable"
+      },
+      "properties": {
+        "version": "16",
+        "administratorLogin": "[parameters('postgresAdminLogin')]",
+        "administratorLoginPassword": "[parameters('postgresAdminPassword')]",
+        "storage": {
+          "storageSizeGB": 32
+        },
+        "backup": {
+          "backupRetentionDays": 7,
+          "geoRedundantBackup": "Disabled"
+        },
+        "highAvailability": {
+          "mode": "Disabled"
+        },
+        "network": {
+          "publicNetworkAccess": "[if(variables('isPrivate'), 'Disabled', 'Enabled')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.DBforPostgreSQL/flexibleServers/databases",
+      "apiVersion": "2024-08-01",
+      "name": "[format('{0}/{1}', variables('postgresServerName'), parameters('postgresDatabaseName'))]",
+      "properties": {
+        "charset": "UTF8",
+        "collation": "en_US.utf8"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DBforPostgreSQL/flexibleServers', variables('postgresServerName'))]"
+      ]
+    },
+    {
+      "condition": "[not(variables('isPrivate'))]",
+      "type": "Microsoft.DBforPostgreSQL/flexibleServers/firewallRules",
+      "apiVersion": "2024-08-01",
+      "name": "[format('{0}/{1}', variables('postgresServerName'), 'AllowAzureServices')]",
+      "properties": {
+        "startIpAddress": "0.0.0.0",
+        "endIpAddress": "0.0.0.0"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DBforPostgreSQL/flexibleServers', variables('postgresServerName'))]"
+      ]
+    },
+    {
+      "condition": "[variables('isPrivate')]",
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2020-06-01",
+      "name": "[variables('postgresPrivateDnsZoneName')]",
+      "location": "global"
+    },
+    {
+      "condition": "[variables('isPrivate')]",
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2020-06-01",
+      "name": "[format('{0}/{1}', variables('postgresPrivateDnsZoneName'), format('{0}-link', variables('vnetName')))]",
+      "location": "global",
+      "properties": {
+        "registrationEnabled": false,
+        "virtualNetwork": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('postgresPrivateDnsZoneName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ]
+    },
+    {
+      "condition": "[variables('isPrivate')]",
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2023-11-01",
+      "name": "[variables('postgresPeName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "subnet": {
+          "id": "[variables('peSubnetId')]"
+        },
+        "privateLinkServiceConnections": [
+          {
+            "name": "postgres",
+            "properties": {
+              "privateLinkServiceId": "[resourceId('Microsoft.DBforPostgreSQL/flexibleServers', variables('postgresServerName'))]",
+              "groupIds": [
+                "postgresqlServer"
+              ]
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DBforPostgreSQL/flexibleServers', variables('postgresServerName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ]
+    },
+    {
+      "condition": "[variables('isPrivate')]",
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2023-11-01",
+      "name": "[format('{0}/{1}', variables('postgresPeName'), 'default')]",
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "postgres",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('postgresPrivateDnsZoneName'))]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('postgresPrivateDnsZoneName'))]",
+        "[resourceId('Microsoft.Network/privateDnsZones/virtualNetworkLinks', variables('postgresPrivateDnsZoneName'), format('{0}-link', variables('vnetName')))]",
+        "[resourceId('Microsoft.Network/privateEndpoints', variables('postgresPeName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('containerAppName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "environmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('environmentName'))]",
+        "configuration": {
+          "ingress": {
+            "external": true,
+            "targetPort": 8000,
+            "transport": "auto",
+            "allowInsecure": false
+          },
+          "secrets": "[if(variables('usePrivateRegistry'), createArray(createObject('name', 'database-url', 'value', format('postgresql+asyncpg://{0}:{1}@{2}:5432/{3}?ssl=require', parameters('postgresAdminLogin'), parameters('postgresAdminPassword'), reference(resourceId('Microsoft.DBforPostgreSQL/flexibleServers', variables('postgresServerName')), '2024-08-01').fullyQualifiedDomainName, parameters('postgresDatabaseName'))), createObject('name', 'admin-password', 'value', parameters('adminPassword')), createObject('name', 'fernet-key', 'value', format('{0}{1}', guid(subscription().id, resourceGroup().id, parameters('appName'), 'fernet'), guid(resourceGroup().id, parameters('appName'), 'fernet2'))), createObject('name', 'registry-password', 'value', parameters('registryPassword'))), createArray(createObject('name', 'database-url', 'value', format('postgresql+asyncpg://{0}:{1}@{2}:5432/{3}?ssl=require', parameters('postgresAdminLogin'), parameters('postgresAdminPassword'), reference(resourceId('Microsoft.DBforPostgreSQL/flexibleServers', variables('postgresServerName')), '2024-08-01').fullyQualifiedDomainName, parameters('postgresDatabaseName'))), createObject('name', 'admin-password', 'value', parameters('adminPassword')), createObject('name', 'fernet-key', 'value', format('{0}{1}', guid(subscription().id, resourceGroup().id, parameters('appName'), 'fernet'), guid(resourceGroup().id, parameters('appName'), 'fernet2')))))]",
+          "registries": "[if(variables('usePrivateRegistry'), createArray(createObject('server', parameters('registryServer'), 'username', parameters('registryUsername'), 'passwordSecretRef', 'registry-password')), createArray())]"
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "azureops",
+              "image": "[parameters('containerImage')]",
+              "env": [
+                {
+                  "name": "BOOTSTRAP_ADMIN_USERNAME",
+                  "value": "[parameters('adminUsername')]"
+                },
+                {
+                  "name": "BOOTSTRAP_ADMIN_PASSWORD",
+                  "secretRef": "admin-password"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "secretRef": "database-url"
+                },
+                {
+                  "name": "FERNET_KEY",
+                  "secretRef": "fernet-key"
+                },
+                {
+                  "name": "DATA_DIR",
+                  "value": "/app/.data"
+                },
+                {
+                  "name": "ENVIRONMENT",
+                  "value": "production"
+                },
+                {
+                  "name": "TRUST_FORWARDED_HEADERS",
+                  "value": "true"
+                },
+                {
+                  "name": "ENABLE_REAL_AZURE_STARTS",
+                  "value": "[string(parameters('enableRealAzureStarts'))]"
+                },
+                {
+                  "name": "ENABLE_REAL_AZURE_STOPS",
+                  "value": "[string(parameters('enableRealAzureStops'))]"
+                },
+                {
+                  "name": "APP_BASE_URL",
+                  "value": "[format('https://{0}.{1}', variables('containerAppName'), reference(resourceId('Microsoft.App/managedEnvironments', variables('environmentName')), '2024-03-01').defaultDomain)]"
+                },
+                {
+                  "name": "ALLOWED_RETURN_ORIGINS",
+                  "value": "[format('https://{0}.{1}', variables('containerAppName'), reference(resourceId('Microsoft.App/managedEnvironments', variables('environmentName')), '2024-03-01').defaultDomain)]"
+                }
+              ],
+              "resources": {
+                "cpu": "[json(parameters('containerCpu'))]",
+                "memory": "[parameters('containerMemory')]"
+              },
+              "volumeMounts": [
+                {
+                  "volumeName": "appdata",
+                  "mountPath": "/app/.data"
+                }
+              ],
+              "probes": [
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": 8000
+                  },
+                  "initialDelaySeconds": 20,
+                  "periodSeconds": 30
+                },
+                {
+                  "type": "Readiness",
+                  "httpGet": {
+                    "path": "/readyz",
+                    "port": 8000
+                  },
+                  "initialDelaySeconds": 10,
+                  "periodSeconds": 15,
+                  "failureThreshold": 10
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": 1,
+            "maxReplicas": 1
+          },
+          "volumes": [
+            {
+              "name": "appdata",
+              "storageType": "AzureFile",
+              "storageName": "[variables('managedEnvStorageName')]"
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DBforPostgreSQL/flexibleServers/firewallRules', variables('postgresServerName'), 'AllowAzureServices')]",
+        "[resourceId('Microsoft.App/managedEnvironments', variables('environmentName'))]",
+        "[resourceId('Microsoft.App/managedEnvironments/storages', variables('environmentName'), variables('managedEnvStorageName'))]",
+        "[resourceId('Microsoft.DBforPostgreSQL/flexibleServers', variables('postgresServerName'))]",
+        "[resourceId('Microsoft.DBforPostgreSQL/flexibleServers/databases', variables('postgresServerName'), parameters('postgresDatabaseName'))]",
+        "[resourceId('Microsoft.Network/privateEndpoints/privateDnsZoneGroups', variables('postgresPeName'), 'default')]",
+        "[resourceId('Microsoft.Network/privateEndpoints/privateDnsZoneGroups', variables('storageFilePeName'), 'default')]"
+      ]
+    }
+  ],
+  "outputs": {
+    "applicationUrl": {
+      "type": "string",
+      "value": "[format('https://{0}', reference(resourceId('Microsoft.App/containerApps', variables('containerAppName')), '2024-03-01').configuration.ingress.fqdn)]"
+    },
+    "containerAppName": {
+      "type": "string",
+      "value": "[variables('containerAppName')]"
+    },
+    "containerAppPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.App/containerApps', variables('containerAppName')), '2024-03-01', 'full').identity.principalId]"
+    },
+    "postgresServerName": {
+      "type": "string",
+      "value": "[variables('postgresServerName')]"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "value": "[variables('storageAccountName')]"
+    },
+    "privateNetworking": {
+      "type": "string",
+      "value": "[parameters('privateNetworking')]"
+    },
+    "vnetName": {
+      "type": "string",
+      "value": "[if(variables('isPrivate'), variables('vnetName'), '')]"
+    },
+    "postgresPrivateEndpoint": {
+      "type": "string",
+      "value": "[if(variables('isPrivate'), variables('postgresPeName'), '')]"
+    }
+  }
+}

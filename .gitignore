@@ -1,0 +1,38 @@
+# Local state and secrets — never commit
+.env
+.env.*
+!.env.example
+.data/
+.pgtest/
+*.key
+secret.key
+deploy/*.parameters.json
+.acrname
+.adminpw
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+.venv/
+venv/
+backend/.coverage
+
+# Node
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Misc
+*.log
+.DS_Store
+.vscode/*.local.json
+
+# Local agent tooling, kept out of the published repository by request.
+# NOTE: this ignores copilot-instructions.md and would ignore any Actions workflow placed
+# under .github/ too. Narrow to `.github/agents/` if you later want CI or shared instructions.
+.github/
+UITestAgent.md

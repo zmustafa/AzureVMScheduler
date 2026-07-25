@@ -1,0 +1,44 @@
+# Local development stack: the same single image the cloud runs, plus PostgreSQL.
+#
+#   docker compose up --build      -> http://localhost:8000
+#
+# The app also runs on SQLite with no database service at all; drop DATABASE_URL and the postgres
+# service if you want the lighter setup.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: azureops
+      POSTGRES_PASSWORD: azureops
+      POSTGRES_DB: azureops
+    volumes:
+      - ./.data/pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U azureops"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      args:
+        APP_VERSION: dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://azureops:azureops@postgres:5432/azureops
+      DATA_DIR: /app/.data
+      BOOTSTRAP_ADMIN_USERNAME: admin
+      BOOTSTRAP_ADMIN_PASSWORD: ChangeMe!12345
+      APP_BASE_URL: http://localhost:8000
+      ALLOWED_RETURN_ORIGINS: http://localhost:8000
+      # Both gates off: waves run against the mock adapter until you deliberately enable them.
+      ENABLE_REAL_AZURE_STARTS: "false"
+      ENABLE_REAL_AZURE_STOPS: "false"
+    volumes:
+      - ./.data/app:/app/.data
+    ports:
+      - "8000:8000"

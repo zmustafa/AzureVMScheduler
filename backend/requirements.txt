@@ -1,0 +1,19 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.32,<1
+sqlalchemy[asyncio]>=2.0.36,<3
+aiosqlite>=0.20,<1
+asyncpg>=0.30,<1
+alembic>=1.14,<2
+pydantic-settings>=2.6,<3
+tzdata>=2024.2
+argon2-cffi>=23.1,<26
+cryptography>=43,<46
+httpx>=0.27,<1
+PyJWT[crypto]>=2.9,<3
+azure-identity>=1.19,<2
+python-multipart>=0.0.17,<1
+# SAML assertion parsing and signature verification. Wheels only - no native xmlsec build.
+lxml>=5.3,<7
+signxml>=4.0,<5
+pytest>=8.3,<9
+pytest-asyncio>=0.24,<1

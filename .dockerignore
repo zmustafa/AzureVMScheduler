@@ -1,0 +1,23 @@
+# Keep the build context small.
+**/.venv
+**/node_modules
+**/.data
+**/.pgtest
+**/__pycache__
+**/*.pyc
+**/.git
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/*.egg-info
+**/build/
+frontend/dist
+.env
+**/.env
+*.log
+**/*.log
+backend/tests/
+e2e/
+.github/
+deploy/
+**/*.md

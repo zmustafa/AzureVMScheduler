@@ -1,0 +1,1 @@
+Alembic migration environment for Azure VM Scheduler. The MVP uses lifespan create_all so a clean checkout starts without running migrations. Generate a reviewed baseline before replacing create_all in production.
