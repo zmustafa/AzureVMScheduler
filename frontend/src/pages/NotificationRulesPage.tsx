@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { BellRing, Layers, Pencil, Plus, Trash2 } from 'lucide-react'
 import { api, json } from '../api'
 import { useCan } from '../auth'

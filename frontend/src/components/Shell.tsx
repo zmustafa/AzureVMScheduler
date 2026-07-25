@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { NavLink, Navigate, Outlet, useLocation } from 'react-router-dom'
+import { NavLink, Navigate, Outlet, useLocation } from 'react-router'
 import { Activity, BellRing, CalendarClock, ChevronDown, Cloud, FileClock, Gauge, KeyRound, Layers, ListTree, Menu, Plug, ScrollText, Server, Settings, ShieldCheck, SlidersHorizontal, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth, hasPermission } from '../auth'

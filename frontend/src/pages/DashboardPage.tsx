@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router'
 import { Activity, AlarmClock, CircleAlert, Layers, Pause, Play, Power, RefreshCcw, Server, TriangleAlert } from 'lucide-react'
 import { api, json } from '../api'
 import { useCan } from '../auth'

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { Bell, CheckCheck, Inbox } from 'lucide-react'
 import { api, json } from '../api'
 import { SeverityDot, UNREAD_KEY, eventLabel, relativeText, severityMeta } from '../lib/notify'

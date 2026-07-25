@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { Pin, PinOff } from 'lucide-react'
 import { useDisplayTimezone } from '../lib/time'
 import { ActionBadge } from './ActionBits'

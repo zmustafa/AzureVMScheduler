@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { CalendarClock, Layers, Plus, Server } from 'lucide-react'
 import { api } from '../api'
 import { useCan } from '../auth'

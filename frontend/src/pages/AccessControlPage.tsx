@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router'
 import { KeyRound, MonitorSmartphone, ShieldCheck, Trash2, Users, UsersRound } from 'lucide-react'
 
 import { api, json } from '../api'

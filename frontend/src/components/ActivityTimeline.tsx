@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { BarChart3 } from 'lucide-react'
 import { bucketSize, formatTick, formatWindow, type TimeRange } from '../lib/timeRange'
 import { Chip } from './Ui'

@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes } from 'react-router'
 import { ProtectedLayout } from './components/Shell'
 import { useCan } from './auth'
 import { LoginPage } from './pages/LoginPage'

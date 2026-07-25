@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router'
 import { ArrowLeft, CheckCircle2, CircleSlash, FolderPlus, Layers, ListChecks, MapPin, Wand2 } from 'lucide-react'
 import { api, json } from '../api'
 import { useCan } from '../auth'
