@@ -20,4 +20,6 @@ backend/tests/
 e2e/
 .github/
 deploy/
+docs/
+screenshotswork/
 **/*.md
