@@ -22,7 +22,7 @@ const nav: NavItem[] = [
   { label: 'Schedules', to: '/schedules', icon: CalendarClock, permission: 'schedules.read' },
   { label: 'Timeline', to: '/timeline', icon: ListTree, permission: 'schedules.read' },
   { label: 'Runs', to: '/runs', icon: Activity, permission: 'runs.read' },
-  { label: 'CSV Import', to: '/import', icon: FileClock, permission: 'imports.write' },
+  { label: 'Import VMs', to: '/import', icon: FileClock, permission: 'imports.write' },
   { label: 'Audit log', to: '/audit', icon: ScrollText, permission: 'audit.read' },
   {
     label: 'Settings', to: '/settings', icon: Settings, permission: null, children: [

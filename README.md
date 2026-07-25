@@ -495,7 +495,7 @@ after 5 failures for 15 minutes; 60-minute idle and 12-hour absolute session lim
 | Schedules | `/schedules`, `/schedules/:id` | Create and edit group or VM schedules, view resolved VMs, manual run, attempts |
 | Timeline | `/timeline` | Upcoming waves laid out in time order |
 | Runs | `/runs`, `/runs/:id` | Run history over a chosen time window, activity timeline with a detailed log, per-VM attempt detail, retry failed |
-| CSV Import | `/import` | Preview and commit the inventory CSV |
+| Import VMs | `/import` | Preview and commit the inventory CSV |
 | Azure Tenants | `/settings/tenants` | Tenant registry, test, discover subscriptions, resolve VM names, live VM discovery |
 | Settings | `/settings` | Default timezone, scheduler tuning, backup & restore, demo data, danger zone |
 | Access control | `/access` | Users, roles, access groups, sessions, security policy, sign-in & SSO |
