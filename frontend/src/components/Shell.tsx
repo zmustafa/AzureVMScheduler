@@ -1,12 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { NavLink, Navigate, Outlet, useLocation } from 'react-router-dom'
-import { Activity, BellRing, CalendarClock, ChevronDown, Cloud, FileClock, Gauge, Layers, ListTree, Menu, Plug, ScrollText, Server, Settings, ShieldCheck, SlidersHorizontal, X } from 'lucide-react'
+import { Activity, BellRing, CalendarClock, ChevronDown, Cloud, FileClock, Gauge, KeyRound, Layers, ListTree, Menu, Plug, ScrollText, Server, Settings, ShieldCheck, SlidersHorizontal, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth, hasPermission } from '../auth'
+import { api, json } from '../api'
 import { DisplayTimezoneSwitcher } from '../lib/time'
 import { useUnreadCount } from '../lib/notify'
 import { NotificationBell } from './NotificationBell'
-import { Loading } from './Ui'
+import { ErrorNotice, Loading } from './Ui'
 
 type NavItem = { label: string; to: string; icon: LucideIcon; permission: string | null; children?: NavItem[] }
 
@@ -83,6 +85,45 @@ function NavGroup({ item, onNavigate }: { item: NavItem; onNavigate: () => void 
   </div>
 }
 
+/**
+ * A forced password change is a server-side wall: every path outside the auth allowlist answers
+ * 403 until the flag clears. That includes the Settings page's own data call, so Settings can
+ * never host this form — it would render its error instead. Hence a dedicated screen that talks
+ * to nothing but `/auth/me` and `/auth/change-password`, both allowlisted.
+ */
+function ForcedPasswordChange() {
+  const { user, logout, refresh } = useAuth()
+  const me = useQuery({ queryKey: ['auth-me'], queryFn: () => api<{ password_policy: { min_length: number } }>('/auth/me') })
+  const [error, setError] = useState<unknown>()
+  const [mismatch, setMismatch] = useState('')
+  const [busy, setBusy] = useState(false)
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setError(undefined); setMismatch('')
+    const form = new FormData(event.currentTarget)
+    if (form.get('new_password') !== form.get('confirm')) { setMismatch('New passwords do not match.'); return }
+    setBusy(true)
+    try {
+      await api('/auth/change-password', json('POST', { current_password: form.get('current_password'), new_password: form.get('new_password') }))
+      await refresh()
+    } catch (reason) { setError(reason) } finally { setBusy(false) }
+  }
+  const minLength = me.data?.password_policy.min_length ?? 12
+  return <main className="grid min-h-screen place-items-center bg-[radial-gradient(circle_at_top,#dbeafe_0,transparent_48%)] p-4"><section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 shadow-xl shadow-slate-200/70">
+    <div className="mb-6 flex items-center gap-4"><span className="grid h-12 w-12 place-items-center rounded-xl bg-azure text-white shadow-md shadow-blue-200"><KeyRound/></span><div><h1 className="text-xl font-bold text-slate-900">Choose a new password</h1><p className="muted">Signed in as {user?.username}.</p></div></div>
+    <p className="mb-5 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">This account still uses its bootstrap password. Nothing else in the application is reachable until it is replaced.</p>
+    <form className="space-y-4" autoComplete="off" onSubmit={submit}>
+      {Boolean(error) && <ErrorNotice error={error}/>}
+      {mismatch && <p className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{mismatch}</p>}
+      <div className="field"><label>Current password</label><input name="current_password" type="password" autoComplete="current-password" required autoFocus/></div>
+      <div className="field"><label>New password</label><input name="new_password" type="password" autoComplete="new-password" minLength={minLength} required/></div>
+      <div className="field"><label>Confirm new password</label><input name="confirm" type="password" autoComplete="new-password" minLength={minLength} required/></div>
+      <p className="text-xs text-slate-500">At least {minLength} characters, with upper and lower case, a number and a symbol.</p>
+      <button className="btn-primary w-full" disabled={busy}>{busy ? 'Updating…' : 'Update password'}</button>
+    </form>
+    <button className="mt-6 w-full text-center text-xs font-medium text-blue-700 hover:text-blue-800" onClick={() => void logout()}>Sign out instead</button>
+  </section></main>
+}
+
 export function ProtectedLayout() {
   const { user, loading, logout } = useAuth()
   const [open, setOpen] = useState(false)
@@ -90,6 +131,9 @@ export function ProtectedLayout() {
   const unread = useUnreadCount(!!user && canSeeNotifications)
   if (loading) return <main className="mx-auto max-w-lg p-8"><Loading /></main>
   if (!user) return <Navigate to="/login" replace />
+  // The server blocks every other path, so showing the app shell behind a banner would only offer
+  // pages that cannot load. Take over the whole screen until the password is replaced.
+  if (user.must_change_password) return <ForcedPasswordChange />
   // Hide a group entirely once every page inside it is out of reach, rather than leaving an empty menu.
   const allowed = nav
     .filter(item => visible(item, user.permissions))
@@ -108,7 +152,7 @@ export function ProtectedLayout() {
       <div className="absolute bottom-4 left-4 right-4 rounded-lg border border-slate-200 bg-white p-3 shadow-sm"><p className="truncate text-sm font-medium text-slate-900">{user.username}</p><p className="text-xs capitalize text-slate-500">{user.role}</p><button className="mt-3 text-xs font-medium text-blue-700 hover:text-blue-800" onClick={() => void logout()}>Sign out</button></div>
     </aside>
     {open && <button className="fixed inset-0 z-10 bg-black/60 lg:hidden" onClick={() => setOpen(false)} aria-label="Close navigation" />}
-    <main className="min-h-screen p-4 sm:p-6 lg:ml-64 lg:p-8"><div className="mx-auto max-w-7xl">{user.must_change_password && <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><span>The bootstrap administrator password must be changed.</span><NavLink className="font-semibold underline" to="/settings">Open password settings</NavLink></div>}<Outlet /></div></main>
+    <main className="min-h-screen p-4 sm:p-6 lg:ml-64 lg:p-8"><div className="mx-auto max-w-7xl"><Outlet /></div></main>
   </div>
 }
 /** Product title in the header. Sized to the sidebar column so it reads as the app's identity. */
