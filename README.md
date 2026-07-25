@@ -503,11 +503,8 @@ after 5 failures for 15 minutes; 60-minute idle and 12-hour absolute session lim
 
 Navigation entries are hidden when the signed-in user lacks the matching permission.
 
-The header carries two global controls:
-
-- **Display timezone switch** — `schedule` (each row in its own schedule's zone, the default), `local`
-  (browser zone), or `utc`. Stored in `localStorage`.
-- **Density toggle** — `comfortable` or `compact` table rows. Stored in `localStorage`.
+The header carries a global **display timezone switch** — `schedule` (each row in its own schedule's
+zone, the default), `local` (browser zone), or `utc`. The choice is stored in `localStorage`.
 
 The UI is **light mode only** — there is no dark theme and none should be added.
 

@@ -27,8 +27,3 @@
   .u-table tbody td { @apply border-t border-slate-200 px-3 py-3 align-middle text-slate-700; }
   .u-table tbody tr:hover { @apply bg-blue-50/50; }
 }
-@layer utilities {
-  [data-density='compact'] .u-table tbody td { @apply py-1.5; }
-  [data-density='compact'] .u-table thead th { @apply py-1.5; }
-  [data-density='compact'] .card { @apply p-3.5; }
-}

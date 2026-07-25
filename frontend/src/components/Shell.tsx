@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Navigate, Outlet, useLocation } from 'react-router-dom'
-import { Activity, BellRing, CalendarClock, ChevronDown, Cloud, FileClock, Gauge, Layers, ListTree, Menu, Plug, Rows3, ScrollText, Server, Settings, ShieldCheck, SlidersHorizontal, StretchHorizontal, X } from 'lucide-react'
+import { Activity, BellRing, CalendarClock, ChevronDown, Cloud, FileClock, Gauge, Layers, ListTree, Menu, Plug, ScrollText, Server, Settings, ShieldCheck, SlidersHorizontal, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth, hasPermission } from '../auth'
 import { DisplayTimezoneSwitcher } from '../lib/time'
@@ -35,7 +35,6 @@ const nav: NavItem[] = [
   },
 ]
 
-const DENSITY_KEY = 'azureops.density'
 const NAV_OPEN_KEY = 'azureops.nav-open'
 
 /** Every nav path, parents and children alike, used to decide which links must match exactly. */
@@ -84,21 +83,6 @@ function NavGroup({ item, onNavigate }: { item: NavItem; onNavigate: () => void 
   </div>
 }
 
-type Density = 'comfortable' | 'compact'
-
-function DensityToggle() {
-  const [density, setDensity] = useState<Density>(() => (localStorage.getItem(DENSITY_KEY) === 'compact' ? 'compact' : 'comfortable'))
-  useEffect(() => {
-    document.documentElement.dataset.density = density
-    try { localStorage.setItem(DENSITY_KEY, density) } catch { /* storage unavailable */ }
-  }, [density])
-  const next: Density = density === 'compact' ? 'comfortable' : 'compact'
-  return <button type="button" className="btn-secondary !px-2 !py-1" aria-label={`Switch to ${next} density`} title={`Row density: ${density}. Click for ${next}.`} onClick={() => setDensity(next)}>
-    {density === 'compact' ? <Rows3 size={16} /> : <StretchHorizontal size={16} />}
-    <span className="hidden capitalize sm:inline">{density}</span>
-  </button>
-}
-
 export function ProtectedLayout() {
   const { user, loading, logout } = useAuth()
   const [open, setOpen] = useState(false)
@@ -115,7 +99,7 @@ export function ProtectedLayout() {
     <header className="sticky top-0 z-30 flex h-16 items-center gap-3 border-b border-slate-200 bg-white/90 px-4 backdrop-blur">
       <button className="btn-secondary !p-2 lg:hidden" onClick={() => setOpen(!open)} aria-label="Toggle navigation">{open ? <X size={20}/> : <Menu size={20}/>}</button>
       <Brand />
-      <div className="ml-auto flex items-center gap-2">{canSeeNotifications && <NotificationBell unread={unread.data ?? 0} />}<DisplayTimezoneSwitcher /><DensityToggle /></div>
+      <div className="ml-auto flex items-center gap-2">{canSeeNotifications && <NotificationBell unread={unread.data ?? 0} />}<DisplayTimezoneSwitcher /></div>
     </header>
     <aside className={`fixed bottom-0 left-0 top-16 z-20 w-64 border-r border-slate-200 bg-sky-50/95 p-4 backdrop-blur transition-transform lg:translate-x-0 ${open ? 'translate-x-0' : '-translate-x-full'}`}>
       <nav className="space-y-1" aria-label="Primary">{allowed.map(item => item.children
