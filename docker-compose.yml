@@ -31,6 +31,9 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://azureops:azureops@postgres:5432/azureops
       DATA_DIR: /app/.data
+      # The image defaults to production. This stack is plain HTTP on localhost, where a Secure
+      # session cookie would never be stored, so it opts back into the development posture.
+      ENVIRONMENT: development
       BOOTSTRAP_ADMIN_USERNAME: admin
       BOOTSTRAP_ADMIN_PASSWORD: ChangeMe!12345
       APP_BASE_URL: http://localhost:8000

@@ -50,6 +50,11 @@ COPY --from=frontend /web/dist ./app/static
 ENV DATA_DIR=/app/.data
 RUN mkdir -p /app/.data
 
+# An image is a deployment artefact, so it defaults to the hardened posture: no /docs, /redoc or
+# /openapi.json, and Secure session cookies. A local checkout running uvicorn from source still
+# defaults to development, and docker-compose sets it back explicitly.
+ENV ENVIRONMENT=production
+
 # Drop privileges: nothing here needs root at runtime.
 RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
 USER appuser
