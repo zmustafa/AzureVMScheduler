@@ -1,0 +1,5 @@
+# Test-only dependencies. Deliberately not in requirements.txt: that file is what the container
+# image installs, and a test runner has no business shipping to production.
+-r requirements.txt
+pytest>=9.0.3,<10
+pytest-asyncio>=0.24,<2

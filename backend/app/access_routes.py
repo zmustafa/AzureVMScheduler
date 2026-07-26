@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .access import (
@@ -28,7 +28,7 @@ from .auth import get_security_policy, hash_password, require_csrf, require_perm
 from .connections import encrypt_value
 from .database import get_db
 from . import oidc, saml
-from .models import AccessGroup, IdentityProvider, LoginSession, Role, User, UserAccessGroup, UserRole, new_id, utcnow
+from .models import AccessGroup, Group, IdentityProvider, ImportBatch, LoginSession, Role, Schedule, User, UserAccessGroup, UserRole, VirtualMachine, new_id, utcnow
 from .permissions import PERMISSION_GROUPS, SYSTEM_ROLE_NAMES, unknown_permissions
 from .schemas import (
     AccessGroupInput,
@@ -197,6 +197,12 @@ async def delete_user(user_id: str, actor: User = Depends(require_csrf), db: Asy
         await assert_admin_remains(db, ignore_user_id=target.id)
     except AccessError as exc:
         raise _fail(exc) from exc
+    # Applications, machines, schedules and import batches carry a nullable created_by pointing at
+    # this row. Deleting the user without releasing them trips the foreign key and the request dies
+    # with a 500, which in practice means an account that has ever created anything can never be
+    # off-boarded. The estate is shared, not owned, so the attribution is what is dropped.
+    for model in (Group, VirtualMachine, Schedule, ImportBatch):
+        await db.execute(update(model).where(model.created_by == user_id).values(created_by=None))
     await db.delete(target)
     audit(db, actor, "user.deleted", "user", user_id, {"username": target.username})
     await db.commit()

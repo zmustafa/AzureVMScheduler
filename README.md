@@ -221,6 +221,7 @@ servers. They are defined but never launched automatically.
 ### Tests
 
 ```powershell
+pip install -r backend/requirements-dev.txt   # runtime deps plus the test runner
 .\.venv\Scripts\python.exe -m pytest backend/tests -q
 npm --prefix frontend run build   # tsc -b + vite; catches types the dev server tolerates
 npm --prefix frontend run lint

@@ -10,7 +10,7 @@ Prerequisites: Python 3.12+, Node 22+, and Docker (optional, for PostgreSQL).
 # Backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r backend/requirements.txt
+pip install -r backend/requirements-dev.txt   # runtime deps plus the test runner
 Copy-Item .env.example .env      # change the bootstrap password
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000   # run from .\backend
 
