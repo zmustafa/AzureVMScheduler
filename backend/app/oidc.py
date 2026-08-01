@@ -24,6 +24,7 @@ import base64
 import hashlib
 import ipaddress
 import json
+import re
 import secrets
 import socket
 import time
@@ -47,6 +48,20 @@ _discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 DEFAULT_SCOPES = "openid profile email"
 DEFAULT_GROUP_CLAIM = "groups"
+
+#: The only shape an outbound identity-provider URL is allowed to take: https, a plain DNS
+#: hostname or IP literal, an optional port, and a path/query drawn from the unreserved and
+#: percent-encoded character sets. No userinfo, no other scheme, no control characters, no
+#: whitespace. The whole string is matched against this before it is ever parsed, so a hostile
+#: provider configuration cannot smuggle in a different scheme or a credential-bearing authority.
+_SAFE_URL_PATTERN = (
+    r"https://"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\.)*"
+    r"[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?"
+    r"(?::[1-9][0-9]{0,4})?"
+    r"(?:/[A-Za-z0-9._~\-/%]*)?"
+    r"(?:\?[A-Za-z0-9._~\-/%&=+,:@]*)?"
+)
 
 
 def _b64url(value: bytes) -> str:
@@ -76,13 +91,17 @@ async def require_public_https_url(url: str) -> str:
 
     Endpoint URLs come from provider configuration and from the provider's own discovery
     document, so they are attacker-influenced from CodeQL's point of view and, more practically,
-    from the point of view of anyone who can reach the connections admin. Requiring TLS and a
-    publicly routable destination keeps the container from being used to probe the cloud metadata
-    endpoint or anything else on the private network.
+    from the point of view of anyone who can reach the connections admin. Two gates apply, in
+    order: the string must match ``_SAFE_URL_PATTERN`` in its entirety, and the host must resolve
+    only to publicly routable addresses. Together they keep the container from being used to probe
+    the cloud metadata endpoint or anything else on the private network.
     """
-    parsed = urlparse(url)
+    candidate = (url or "").strip()
+    if not re.fullmatch(_SAFE_URL_PATTERN, candidate):
+        raise HTTPException(status_code=400, detail="Identity provider endpoints must be absolute https URLs")
+    parsed = urlparse(candidate)
     host = parsed.hostname or ""
-    if parsed.scheme != "https" or not host:
+    if not host:
         raise HTTPException(status_code=400, detail="Identity provider endpoints must be absolute https URLs")
     if not await asyncio.to_thread(_is_public_address, host):
         raise HTTPException(status_code=400, detail="Identity provider endpoints must resolve to a public address")

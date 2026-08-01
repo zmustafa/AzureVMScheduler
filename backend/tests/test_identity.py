@@ -11,6 +11,7 @@ from datetime import timedelta
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from app import ip_lockout, oidc, saml
@@ -80,6 +81,27 @@ def test_the_issuer_is_derived_from_an_entra_directory_id() -> None:
 def test_the_discovery_url_defaults_to_the_well_known_path() -> None:
     assert oidc.discovery_url_for({"issuer": "https://idp.example"}) == "https://idp.example/.well-known/openid-configuration"
     assert oidc.discovery_url_for({"issuer": "https://idp.example", "discovery_url": "https://other/.well-known"}) == "https://other/.well-known"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://idp.example/.well-known/openid-configuration",  # not TLS
+        "file:///etc/passwd",  # not even http
+        "https://user:pass@idp.example/",  # credential-bearing authority
+        "https://idp.example\n/x",  # header smuggling
+        "https://169.254.169.254/metadata/instance",  # cloud metadata service
+        "https://127.0.0.1/token",  # loopback
+        "https://10.0.0.5/token",  # private network
+        "https://[::1]/token",  # loopback, IPv6 literal
+        "//idp.example/x",  # scheme relative
+        "",
+    ],
+)
+async def test_outbound_identity_urls_reject_anything_but_a_public_https_endpoint(url: str) -> None:
+    with pytest.raises(HTTPException) as caught:
+        await oidc.require_public_https_url(url)
+    assert caught.value.status_code == 400
 
 
 def test_pkce_verifier_and_challenge_are_bound() -> None:
