@@ -13,7 +13,7 @@ with two independent safety gates standing between you and a real Azure power ac
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker Image](https://img.shields.io/badge/docker-zmustafa%2Fazure--vm--scheduler-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/zmustafa/azure-vm-scheduler)
 [![Python 3.12](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](backend/pyproject.toml)
-[![React 19](https://img.shields.io/badge/react-19-61DAFB?logo=react&logoColor=black)](frontend/package.json)
+[![React 18](https://img.shields.io/badge/react-18-61DAFB?logo=react&logoColor=black)](frontend/package.json)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
@@ -47,14 +47,11 @@ Azure VM Scheduler makes the *application* the unit of scheduling:
 > Built for platform teams, SREs, and anyone who owns a dev/test estate they would rather not pay
 > for at 3am.
 
-![Product tour](docs/product-tour.gif)
-
 ---
 
 ## Table of Contents
 
 - [✨ Features](#-features)
-- [🎬 See it in action](#-see-it-in-action)
 - [🚀 Deploy to Azure (one-click)](#-deploy-to-azure-one-click)
 - [⚡ Quick start (local)](#-quick-start-local)
 - [🧩 How it works](#-how-it-works)
@@ -96,43 +93,6 @@ Azure VM Scheduler makes the *application* the unit of scheduling:
 🛡️ CSRF + same-origin enforcement + security headers on every response · 🌐 optional fully private
 networking (Private Endpoints for database and storage) · 🏢 multi-tenant Azure connections ·
 🆔 managed-identity support with no stored secret at all.
-
----
-
-## 🎬 See it in action
-
-Every clip below is the real application driving the built-in demo estate — four applications, nine
-rings, eighteen virtual machines and seven start/stop waves — with both safety gates off, so nothing
-in Azure is ever touched.
-
-### Building a schedule, with the answer as you type
-
-The editor asks the server to describe the recurrence and return its next five occurrences on every
-keystroke, so cron and DST are answered by the same engine the scheduler runs.
-
-![Schedule builder with live recurrence preview](docs/schedule-builder.gif)
-
-### Stops are guarded
-
-Picking machines and pressing **Stop now** does not stop anything. The dialog names the tenant,
-states the mode, and refuses to arm until the exact machine count is typed back.
-
-![Stop confirmation with the exact-count guard](docs/stop-safety.gif)
-
-### Running a wave
-
-A manual run fans out into one attempt per virtual machine, staggered, with the outcome of each
-recorded.
-
-![Running a wave and inspecting per-VM attempts](docs/run-wave.gif)
-
-### The rest
-
-| | |
-| --- | --- |
-| **Overview**<br>Readiness checks, windowed KPIs, rollout plan, health matrix and coverage gaps.<br>[![Overview](docs/overview.gif)](docs/overview.gif) | **Ring board**<br>An application and its rings, with sequence, schedules and tenant overrides.<br>[![Ring board](docs/ring-board.gif)](docs/ring-board.gif) |
-| **Timeline & timezones**<br>Upcoming waves re-plotted between schedule, browser and UTC time.<br>[![Timeline](docs/timeline-timezones.gif)](docs/timeline-timezones.gif) | **CSV import**<br>A validating preview that reports exactly what would be created before committing.<br>[![CSV import](docs/csv-import.gif)](docs/csv-import.gif) |
-| **Access control**<br>Users, roles, access groups, sessions, policies and SSO on one page.<br>[![Access control](docs/access-control.gif)](docs/access-control.gif) | **Full tour**<br>Every page end to end.<br>[![Product tour](docs/product-tour.gif)](docs/product-tour.gif) |
 
 ---
 
@@ -221,7 +181,6 @@ servers. They are defined but never launched automatically.
 ### Tests
 
 ```powershell
-pip install -r backend/requirements-dev.txt   # runtime deps plus the test runner
 .\.venv\Scripts\python.exe -m pytest backend/tests -q
 npm --prefix frontend run build   # tsc -b + vite; catches types the dev server tolerates
 npm --prefix frontend run lint
@@ -329,8 +288,6 @@ causes an outage.
 
 ## ⏰ Scheduling
 
-> 🎬 [Watch the schedule builder](docs/schedule-builder.gif) — the live recurrence preview in action.
-
 - **Frequencies:** `one_time`, `daily`, `weekly` and `cron`. `daily` and `weekly` are stored as
   friendly fields and translated to cron internally, so there is exactly one occurrence engine
   (`app/recurrence.py`) to reason about; `one_time` is the only special case.
@@ -383,9 +340,6 @@ Claiming 50 schedules while only 12 start calls are in flight is the intended sh
 ---
 
 ## 🛡️ Safety model
-
-> 🎬 [Watch the stop guard](docs/stop-safety.gif) — an on-demand stop refusing to arm until the exact
-> machine count is typed back.
 
 Starts and stops are gated **separately**, and each requires **both** of its gates:
 
@@ -462,9 +416,6 @@ UI reports which path was used.
 
 ## 🔐 Authentication & access control
 
-> 🎬 [Watch access control](docs/access-control.gif) — users, roles, access groups, sessions, policies
-> and SSO, all on one page.
-
 - **Local:** Argon2 password hashing, configurable password complexity, lockout after repeated
   failures, idle and absolute session expiry, DB-backed revocable sessions, and CSRF tokens on all
   mutating requests.
@@ -535,8 +486,6 @@ after 5 failures for 15 minutes; 60-minute idle and 12-hour absolute session lim
 
 ## 🗺️ UI map
 
-> 🎬 [Take the tour](docs/product-tour.gif) — every page below, end to end.
-
 | Page | Route | What it does |
 | --- | --- | --- |
 | Overview | `/` | Readiness checks, windowed KPIs with trend, next-24h strip, rollout plan, application health matrix, coverage gaps, reliability stats and an activity feed |
@@ -562,8 +511,6 @@ The UI is **light mode only** — there is no dark theme and none should be adde
 ---
 
 ## 📄 CSV import
-
-> 🎬 [Watch an import](docs/csv-import.gif) — file to validated preview to commit.
 
 UTF-8 CSV up to 2 MB. Preview validates every row and returns an encrypted, expiring token bound to the
 exact normalized rows; commit rejects stale or tampered previews and is atomic.
@@ -661,7 +608,7 @@ template authoring is required.
 | --- | --- |
 | Backend | Python 3.12+, FastAPI (lifespan startup), async SQLAlchemy 2, Pydantic v2, Alembic, Argon2, Fernet |
 | Database | PostgreSQL in Azure; SQLite at `.data/azureops.db` locally — the engine is chosen by `DATABASE_URL` |
-| Frontend | React 19, TypeScript, Vite, Tailwind CSS, React Router, TanStack Query |
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS, React Router, TanStack Query |
 | Packaging | One container image: the built SPA is served by the FastAPI backend at the same origin |
 | Scheduler | In-process asyncio loop inside the FastAPI app, DB lease-based claiming |
 | Azure | `azure-identity` + ARM compute calls and Resource Graph, or a deterministic mock adapter |

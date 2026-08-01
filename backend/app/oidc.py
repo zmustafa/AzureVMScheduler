@@ -19,10 +19,13 @@ Provider configuration (``identity_providers.config_json``):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import secrets
+import socket
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -48,6 +51,42 @@ DEFAULT_GROUP_CLAIM = "groups"
 
 def _b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+
+def _is_public_address(host: str) -> bool:
+    """True only when every address the host resolves to is a routable public address."""
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if not address.is_global or address.is_multicast or address.is_reserved:
+            return False
+    return True
+
+
+async def require_public_https_url(url: str) -> str:
+    """Guard every outbound identity-provider call against server-side request forgery.
+
+    Endpoint URLs come from provider configuration and from the provider's own discovery
+    document, so they are attacker-influenced from CodeQL's point of view and, more practically,
+    from the point of view of anyone who can reach the connections admin. Requiring TLS and a
+    publicly routable destination keeps the container from being used to probe the cloud metadata
+    endpoint or anything else on the private network.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if parsed.scheme != "https" or not host:
+        raise HTTPException(status_code=400, detail="Identity provider endpoints must be absolute https URLs")
+    if not await asyncio.to_thread(_is_public_address, host):
+        raise HTTPException(status_code=400, detail="Identity provider endpoints must resolve to a public address")
+    return f"https://{parsed.netloc}{parsed.path}" + (f"?{parsed.query}" if parsed.query else "")
 
 
 def validate_return_url(value: str | None) -> str:
@@ -89,9 +128,10 @@ async def discover(config: dict[str, Any]) -> dict[str, Any]:
     cached = _discovery_cache.get(url)
     if cached and time.monotonic() - cached[0] < _DISCOVERY_TTL_SECONDS:
         return cached[1]
+    safe_url = await require_public_https_url(url)
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(url)
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+            response = await client.get(safe_url)
             response.raise_for_status()
             document = response.json()
     except httpx.HTTPError as exc:
@@ -169,7 +209,9 @@ async def build_authorize_url(provider: IdentityProvider, redirect_uri: str, ret
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     }
-    return f"{document['authorization_endpoint']}?{urlencode(params)}"
+    authorize = await require_public_https_url(str(document["authorization_endpoint"]))
+    separator = "&" if "?" in authorize else "?"
+    return f"{authorize}{separator}{urlencode(params)}"
 
 
 async def exchange_and_validate(
@@ -183,10 +225,12 @@ async def exchange_and_validate(
     if not config.get("client_secret_encrypted"):
         raise HTTPException(status_code=503, detail="This provider has no client secret configured")
     document = await discover(config)
+    token_endpoint = await require_public_https_url(str(document["token_endpoint"]))
+    jwks_uri = await require_public_https_url(str(document["jwks_uri"]))
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
             token_response = await client.post(
-                document["token_endpoint"],
+                token_endpoint,
                 data={
                     "client_id": config["client_id"],
                     "client_secret": decrypt_value(config["client_secret_encrypted"]),
@@ -199,7 +243,7 @@ async def exchange_and_validate(
             )
             token_response.raise_for_status()
             token_data = token_response.json()
-            jwks_response = await client.get(document["jwks_uri"])
+            jwks_response = await client.get(jwks_uri)
             jwks_response.raise_for_status()
         id_token = token_data.get("id_token")
         if not id_token:
@@ -262,8 +306,9 @@ async def test_config(config: dict[str, Any]) -> list[dict[str, Any]]:
             "name": "Discovery document", "ok": True, "critical": True,
             "detail": f"Authorization endpoint {document['authorization_endpoint']}",
         })
-        async with httpx.AsyncClient(timeout=20) as client:
-            jwks = await client.get(document["jwks_uri"])
+        jwks_uri = await require_public_https_url(str(document["jwks_uri"]))
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+            jwks = await client.get(jwks_uri)
             jwks.raise_for_status()
             keys = len(jwks.json().get("keys", []))
         checks.append({

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
-from contextlib import suppress
 from datetime import timedelta
 from collections.abc import Callable
 from urllib.parse import urlparse
@@ -22,17 +21,6 @@ from .models import IdentityProviderSettings, LoginSession, SecurityPolicy, User
 SESSION_COOKIE = "azureops_session"
 CSRF_COOKIE = "azureops_csrf"
 _password_hasher = PasswordHasher()
-
-#: Verified against when the account does not exist or has no local password, so an unknown
-#: username costs the same Argon2 work as a known one. Without it the sign-in latency is a
-#: reliable username oracle even though the response body is identical.
-_DUMMY_HASH = _password_hasher.hash(secrets.token_urlsafe(32))
-
-
-def verify_dummy_password(password: str) -> None:
-    """Burn one Argon2 verification so a miss and a hit take the same time."""
-    with suppress(Exception):
-        _password_hasher.verify(_DUMMY_HASH, password)
 
 #: Fallback used only when permissions could not be resolved from the database — a user object
 #: built outside a request, or a role row that has gone missing. Real authorisation comes from the
@@ -146,30 +134,11 @@ async def create_login_session(db: AsyncSession, user: User, response: Response,
     expires = utcnow() + timedelta(hours=policy.session_absolute_hours)
     db.add(LoginSession(id=token_hash(raw_token), user_id=user.id, csrf_token=csrf, expires_at=expires, auth_method=auth_method, ip_address=request.client.host if request and request.client else None, user_agent=(request.headers.get("user-agent") or "")[:500] if request else None))
     await db.commit()
-    secure = cookies_are_secure(request)
+    secure = settings.environment.lower() == "production"
     max_age = policy.session_absolute_hours * 3600
     response.set_cookie(SESSION_COOKIE, raw_token, httponly=True, secure=secure, samesite="lax", max_age=max_age, path="/")
     response.set_cookie(CSRF_COOKIE, csrf, httponly=False, secure=secure, samesite="lax", max_age=max_age, path="/")
     return csrf
-
-
-def cookies_are_secure(request: Request | None) -> bool:
-    """Whether the session cookies may carry the Secure attribute.
-
-    Keyed off the transport actually in use rather than only off ``ENVIRONMENT``: a deployment
-    that serves the app over TLS but forgets to set ``ENVIRONMENT=production`` would otherwise
-    hand the browser a cookie it is willing to replay over plain HTTP.
-    """
-    settings = get_settings()
-    if settings.environment.lower() == "production":
-        return True
-    if request is None:
-        return False
-    if request.url.scheme == "https":
-        return True
-    if settings.trust_forwarded_headers:
-        return (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower() == "https"
-    return False
 
 
 def clear_session_cookies(response: Response) -> None:
@@ -242,6 +211,12 @@ async def current_session(request: Request, db: AsyncSession = Depends(get_db)) 
 
 async def current_user(auth: tuple[LoginSession, User] = Depends(current_session)) -> User:
     return auth[1]
+
+
+async def require_admin(user: User = Depends(current_user)) -> User:
+    if not has_permission(user, "users.manage"):
+        raise HTTPException(status_code=403, detail="Administrator permission required")
+    return user
 
 
 def has_permission(user: User, permission: str) -> bool:

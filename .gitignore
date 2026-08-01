@@ -31,10 +31,6 @@ frontend/dist/
 .DS_Store
 .vscode/*.local.json
 
-# Capture workspace for screenshots and GIFs. Raw captures stay local; only the images
-# deliberately copied into the repository for the README are ever committed.
-screenshotswork/
-
 # Local agent tooling, kept out of the published repository by request.
 # NOTE: this ignores copilot-instructions.md and would ignore any Actions workflow placed
 # under .github/ too. Narrow to `.github/agents/` if you later want CI or shared instructions.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -30,11 +31,11 @@ from .auth import (
     current_user,
     hash_password,
     needs_rehash,
+    require_admin,
     require_csrf,
     require_permission,
     token_hash,
     validate_password,
-    verify_dummy_password,
     verify_password,
 )
 from .access import cached_permissions
@@ -153,18 +154,10 @@ async def lifespan(_: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(
-    title="Azure VM Scheduler API",
-    version="0.1.0",
-    lifespan=lifespan,
-    # The schema and the interactive explorers are unauthenticated by construction, so outside a
-    # development checkout they are switched off rather than handing an anonymous caller the full
-    # route map, parameter names and validation rules.
-    openapi_url="/openapi.json" if get_settings().environment.lower() == "development" else None,
-    docs_url="/docs" if get_settings().environment.lower() == "development" else None,
-    redoc_url="/redoc" if get_settings().environment.lower() == "development" else None,
-)
+app = FastAPI(title="Azure VM Scheduler API", version="0.1.0", lifespan=lifespan)
 app.include_router(access_router)
+
+logger = logging.getLogger(__name__)
 
 
 #: Sent on every response. The app is same-origin (the SPA is served by this process), so the
@@ -298,6 +291,19 @@ def _aware(value: datetime | None) -> datetime | None:
 def _safe_error(exc: Exception) -> str:
     text = re.sub(r"(?i)(client_secret|access_token|authorization|password)\s*[:=]\s*[^\s,;]+", r"\1=[redacted]", str(exc))
     return text[:300] or "Operation failed"
+
+
+def _validation_message(exc: Exception, fallback: str = "This row could not be processed") -> str:
+    """The message to show a caller for a rejected item.
+
+    Only our own validation errors carry a message that is safe and useful to echo back. Anything
+    else is an internal failure whose text can leak SQL, file paths or stack detail, so it is
+    logged for an operator and replaced with a generic message in the response.
+    """
+    if isinstance(exc, ValueError):
+        return _safe_error(exc)
+    logger.exception("Rejected an item because of an unexpected error")
+    return fallback
 
 
 def _sorted(statement, columns: dict[str, Any], sort: str | None, direction: str, default: str):
@@ -496,10 +502,6 @@ async def login(payload: LoginRequest, request: Request, response: Response, db:
     if locked_until is not None and locked_until > now:
         raise HTTPException(status_code=423, detail="Account is temporarily locked")
     valid = bool(user and user.password_hash and verify_password(user.password_hash, payload.password))
-    if not (user and user.password_hash):
-        # Spend the same Argon2 work on a miss, or the response latency reveals which usernames
-        # exist even though the body is identical either way.
-        verify_dummy_password(payload.password)
     if not user or user.disabled or not valid:
         if user and not user.disabled:
             user.failed_login_count += 1
@@ -648,43 +650,16 @@ async def me(user: User = Depends(current_user), db: AsyncSession = Depends(get_
 
 
 @app.post("/api/auth/change-password")
-async def change_password(payload: ChangePasswordRequest, request: Request, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    policy = await get_security_policy(db)
-    # Same brute-force controls as sign-in: without them a stolen session cookie turns this into
-    # an unthrottled oracle for the account's current password.
-    ip = ip_lockout.client_ip(request)
-    blocked_for = await ip_lockout.check(db, policy, ip)
-    if blocked_for is not None:
-        raise HTTPException(status_code=429, detail=f"Too many attempts. Try again in {blocked_for} seconds.")
-    locked_until = _aware(user.locked_until)
-    if locked_until is not None and locked_until > utcnow():
-        raise HTTPException(status_code=423, detail="Account is temporarily locked")
+async def change_password(payload: ChangePasswordRequest, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
     if not user.password_hash or not verify_password(user.password_hash, payload.current_password):
-        user.failed_login_count += 1
-        if user.failed_login_count >= policy.lockout_attempts:
-            user.locked_until = utcnow() + timedelta(minutes=policy.lockout_minutes)
-            user.failed_login_count = 0
-        await ip_lockout.record_failure(db, policy, ip)
-        audit(db, user, "auth.password_change_failed", "user", user.id)
-        await db.commit()
         raise HTTPException(status_code=400, detail="Current password is incorrect")
+    policy = await get_security_policy(db)
     errors = validate_password(payload.new_password, policy)
     if errors:
         raise HTTPException(status_code=422, detail=errors)
     user.password_hash = hash_password(payload.new_password)
     user.must_change_password = False
-    user.failed_login_count = 0
-    user.locked_until = None
-    await ip_lockout.clear(db, ip)
-    # Every other session for this account is dropped: if the password is being changed because it
-    # leaked, the thief's session must not survive the reset.
-    current = token_hash(request.cookies.get(SESSION_COOKIE, ""))
-    revoked = await db.execute(
-        update(LoginSession)
-        .where(LoginSession.user_id == user.id, LoginSession.id != current, LoginSession.revoked_at.is_(None))
-        .values(revoked_at=utcnow())
-    )
-    audit(db, user, "auth.password_changed", "user", user.id, {"other_sessions_revoked": revoked.rowcount})
+    audit(db, user, "auth.password_changed", "user", user.id)
     await db.commit()
     return {"ok": True, "user": user_view(user)}
 
@@ -698,7 +673,8 @@ async def general_settings(user: User = Depends(current_user), db: AsyncSession 
 
 @app.put("/api/settings/general")
 async def general_settings_update(payload: dict[str, Any], user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    require_manage(user, "settings.write")
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Administrator permission required")
     policy = await get_security_policy(db)
     if "default_timezone" in payload:
         try:
@@ -718,7 +694,7 @@ async def general_settings_update(payload: dict[str, Any], user: User = Depends(
 
 
 @app.get("/api/admin/export")
-async def settings_export(user: User = Depends(require_permission("backup.manage")), db: AsyncSession = Depends(get_db)):
+async def settings_export(user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     """Portable settings document. Secrets are deliberately absent and must be re-entered after import."""
     document = await build_export(db, await list_connections(public=True), await list_connectors(public=True), app.version)
     audit(db, user, "settings.exported", "backup", None, {"groups": len(document["groups"]), "vms": len(document["virtual_machines"]), "schedules": len(document["schedules"])})
@@ -732,7 +708,7 @@ async def settings_export(user: User = Depends(require_permission("backup.manage
 
 
 @app.get("/api/admin/import/sections")
-async def settings_import_sections(user: User = Depends(require_permission("backup.manage"))):
+async def settings_import_sections(user: User = Depends(require_admin)):
     return {"sections": list(BACKUP_SECTIONS)}
 
 
@@ -759,7 +735,8 @@ async def _run_import(payload: SettingsImportRequest, user: User, db: AsyncSessi
 
 @app.post("/api/admin/import/preview")
 async def settings_import_preview(payload: SettingsImportRequest, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    require_manage(user, "backup.manage")
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Administrator permission required")
     summary = await _run_import(payload, user, db, dry_run=True)
     await db.rollback()  # a preview never persists anything
     return summary
@@ -767,7 +744,8 @@ async def settings_import_preview(payload: SettingsImportRequest, user: User = D
 
 @app.post("/api/admin/import")
 async def settings_import(payload: SettingsImportRequest, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    require_manage(user, "backup.manage")
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Administrator permission required")
     summary = await _run_import(payload, user, db, dry_run=False)
     audit(db, user, "settings.imported", "backup", None, {"mode": payload.mode, "sections": payload.sections or list(BACKUP_SECTIONS), "created": summary["created"], "skipped": summary["skipped"], "failed": summary["failed"]})
     try:
@@ -781,7 +759,8 @@ async def settings_import(payload: SettingsImportRequest, user: User = Depends(r
 @app.post("/api/admin/reset-estate")
 async def estate_reset(payload: EstateResetRequest, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
     """Destroys every application, ring, VM, schedule and run. Identity, audit and credentials survive."""
-    require_manage(user, "backup.manage")
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Administrator permission required")
     if payload.confirm != "DELETE":
         raise HTTPException(status_code=422, detail="Type DELETE to confirm removing every application, virtual machine and schedule")
     removed = await reset_estate(db)
@@ -1080,7 +1059,7 @@ async def group_vms_add(group_id: str, payload: VmBulkAdd, response: Response, u
         try:
             parsed = parse_vm_resource_id(resource_id)
         except ValueError as exc:
-            errors.append({"vm_resource_id": resource_id, "error": str(exc)})
+            errors.append({"vm_resource_id": resource_id, "error": _safe_error(exc)})
             continue
         if normalized in seen or await db.scalar(select(VirtualMachine.id).where(VirtualMachine.normalized_resource_id == normalized)):
             errors.append({"vm_resource_id": resource_id, "error": "This VM is already in the inventory"})
@@ -1428,7 +1407,7 @@ async def schedule_preview(payload: RecurrencePreviewInput, user: User = Depends
         recurrence_validate(recurrence)
         moments = upcoming_occurrences(recurrence, count=5)
     except RecurrenceError as exc:
-        return {"valid": False, "error": str(exc), "description": "", "cron": "", "next_run_at": None, "upcoming": []}
+        return {"valid": False, "error": _safe_error(exc), "description": "", "cron": "", "next_run_at": None, "upcoming": []}
     cron = "" if recurrence.schedule_type == "one_time" else to_cron_expression(recurrence)
     return {
         "valid": True,
@@ -1839,7 +1818,7 @@ async def _commit_inventory(payload: CsvCommitRequest, user: User, db: AsyncSess
             group = await _ensure_group_path(db, [item.strip() for item in segments if item.strip()], user, created_groups)
             created_vms.append(VirtualMachine(id=new_id(), group_id=group.id, vm_resource_id=resource_id.strip(), normalized_resource_id=normalized, display_name=str(row.get("display_name") or parsed.vm_name), subscription_id=parsed.subscription_id, resource_group=parsed.resource_group, vm_name=parsed.vm_name, azure_connection_id=row.get("azure_connection_id"), enabled=bool(row.get("enabled", True)), never_stop=bool(row.get("never_stop", False)), notes=str(row.get("notes", "")), created_by=user.id))
         except Exception as exc:
-            errors.append({"row": index, "error": str(exc)})
+            errors.append({"row": index, "error": _validation_message(exc)})
     if errors and payload.reject_all:
         await db.rollback()
         raise HTTPException(status_code=422, detail={"message": "Import rejected atomically; nothing was created", "errors": errors})
@@ -1888,7 +1867,7 @@ async def csv_commit(payload: CsvCommitRequest, user: User = Depends(require_csr
         except HTTPException as exc:
             errors.append({"row": index, "error": str(exc.detail)})
         except Exception as exc:
-            errors.append({"row": index, "error": str(exc)})
+            errors.append({"row": index, "error": _validation_message(exc)})
     if errors and payload.reject_all:
         await db.rollback()
         raise HTTPException(status_code=422, detail={"message": "Import rejected atomically; no schedules were created", "errors": errors})
@@ -1911,7 +1890,8 @@ async def connections_list(user: User = Depends(require_permission("schedules.re
 
 @app.put("/api/connections")
 async def connection_upsert(payload: ConnectionInput, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    require_manage(user, "connections.manage")
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Administrator permission required")
     try:
         result = await upsert_connection(payload.model_dump(exclude_none=True))
     except ValueError as exc:
@@ -1923,7 +1903,8 @@ async def connection_upsert(payload: ConnectionInput, user: User = Depends(requi
 
 @app.delete("/api/connections/{connection_id}")
 async def connection_delete(connection_id: str, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    require_manage(user, "connections.manage")
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Administrator permission required")
     if not await delete_connection(connection_id):
         raise HTTPException(status_code=404, detail="Connection not found")
     audit(db, user, "connection.deleted", "connection", connection_id)
@@ -1933,7 +1914,8 @@ async def connection_delete(connection_id: str, user: User = Depends(require_csr
 
 @app.post("/api/connections/{connection_id}/default")
 async def connection_default(connection_id: str, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    require_manage(user, "connections.manage")
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Administrator permission required")
     try:
         result = await set_default(connection_id)
     except KeyError as exc:
@@ -1976,12 +1958,13 @@ async def connection_live_action(connection_id: str, action: str, user: User, db
 
 @app.post("/api/connections/{connection_id}/test")
 async def connection_test(connection_id: str, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    require_manage(user, "connections.manage")
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Administrator permission required")
     return await connection_live_action(connection_id, "tested", user, db)
 
 
 @app.get("/api/connections/{connection_id}/discover")
-async def connection_discover(connection_id: str, user: User = Depends(require_permission("connections.manage")), db: AsyncSession = Depends(get_db)):
+async def connection_discover(connection_id: str, user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return await connection_live_action(connection_id, "discovered", user, db)
 
 
@@ -2332,13 +2315,22 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 if STATIC_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
+    #: The exact set of files the SPA route may serve, keyed by their URL path. Building the map
+    #: once at start-up means a request path is only ever a dictionary key — it is never joined
+    #: onto a filesystem path, so no crafted value can traverse out of the static directory.
+    SERVABLE_FILES: dict[str, Path] = {
+        path.relative_to(STATIC_DIR).as_posix(): path
+        for path in STATIC_DIR.rglob("*")
+        if path.is_file()
+    }
+    INDEX_HTML = STATIC_DIR / "index.html"
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
         """Serve index.html for client-side routes; real files still win."""
         if full_path.startswith(("api/", "healthz", "readyz", "health")):
             raise HTTPException(status_code=404, detail="Not found")
-        candidate = (STATIC_DIR / full_path).resolve()
-        # Containment check: a crafted path must not escape the static directory.
-        if full_path and candidate.is_file() and candidate.is_relative_to(STATIC_DIR):
-            return FileResponse(candidate)
-        return FileResponse(STATIC_DIR / "index.html")
+        target = SERVABLE_FILES.get(full_path)
+        if target is not None:
+            return FileResponse(target)
+        return FileResponse(INDEX_HTML)

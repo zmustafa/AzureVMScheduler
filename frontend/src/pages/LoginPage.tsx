@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Navigate, useNavigate } from 'react-router'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { Activity, LockKeyhole } from 'lucide-react'
 import { useAuth } from '../auth'
 import { ErrorNotice } from '../components/Ui'
