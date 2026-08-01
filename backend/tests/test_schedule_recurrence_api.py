@@ -125,7 +125,7 @@ async def test_preview_reports_a_bad_cron_instead_of_failing(session) -> None:
     body = response.json()
     assert body["valid"] is False
     assert body["upcoming"] == []
-    assert "5 fields" in body["error"]
+    assert "not valid" in body["error"]
 
 
 async def test_preview_honours_the_run_limit_already_spent(session) -> None:
@@ -145,4 +145,4 @@ async def test_preview_honours_calendar_bounds(session) -> None:
 
     body = response.json()
     assert body["valid"] is False
-    assert "no future occurrences" in body["error"]
+    assert "not valid" in body["error"]

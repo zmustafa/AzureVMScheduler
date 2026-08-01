@@ -296,13 +296,11 @@ def _safe_error(exc: Exception) -> str:
 def _validation_message(exc: Exception, fallback: str = "This row could not be processed") -> str:
     """The message to show a caller for a rejected item.
 
-    Only our own validation errors carry a message that is safe and useful to echo back. Anything
-    else is an internal failure whose text can leak SQL, file paths or stack detail, so it is
-    logged for an operator and replaced with a generic message in the response.
+    No exception text ever reaches a response. Even our own validation messages can carry
+    identifiers, SQL fragments or file paths, so the exception is logged in full for an operator
+    and the caller gets a fixed message chosen at the call site.
     """
-    if isinstance(exc, ValueError):
-        return _safe_error(exc)
-    logger.exception("Rejected an item because of an unexpected error")
+    logger.warning("Rejected an item: %s", fallback, exc_info=exc)
     return fallback
 
 
@@ -1059,7 +1057,7 @@ async def group_vms_add(group_id: str, payload: VmBulkAdd, response: Response, u
         try:
             parsed = parse_vm_resource_id(resource_id)
         except ValueError as exc:
-            errors.append({"vm_resource_id": resource_id, "error": _safe_error(exc)})
+            errors.append({"vm_resource_id": resource_id, "error": _validation_message(exc, "This is not a valid Azure virtual machine resource ID")})
             continue
         if normalized in seen or await db.scalar(select(VirtualMachine.id).where(VirtualMachine.normalized_resource_id == normalized)):
             errors.append({"vm_resource_id": resource_id, "error": "This VM is already in the inventory"})
@@ -1407,7 +1405,8 @@ async def schedule_preview(payload: RecurrencePreviewInput, user: User = Depends
         recurrence_validate(recurrence)
         moments = upcoming_occurrences(recurrence, count=5)
     except RecurrenceError as exc:
-        return {"valid": False, "error": _safe_error(exc), "description": "", "cron": "", "next_run_at": None, "upcoming": []}
+        message = _validation_message(exc, "This recurrence is not valid — check the frequency, time of day, cron expression and date bounds")
+        return {"valid": False, "error": message, "description": "", "cron": "", "next_run_at": None, "upcoming": []}
     cron = "" if recurrence.schedule_type == "one_time" else to_cron_expression(recurrence)
     return {
         "valid": True,
@@ -1812,7 +1811,8 @@ async def _commit_inventory(payload: CsvCommitRequest, user: User, db: AsyncSess
             parsed = parse_vm_resource_id(resource_id)
             normalized = normalize_resource_id(resource_id)
             if normalized in seen or await db.scalar(select(VirtualMachine.id).where(VirtualMachine.normalized_resource_id == normalized)):
-                raise ValueError("This VM is already in the inventory")
+                errors.append({"row": index, "error": "This VM is already in the inventory"})
+                continue
             seen.add(normalized)
             segments = [str(row.get("application", ""))] + [item for item in str(row.get("ring_path", "")).split("/") if item.strip()]
             group = await _ensure_group_path(db, [item.strip() for item in segments if item.strip()], user, created_groups)
@@ -1865,7 +1865,7 @@ async def csv_commit(payload: CsvCommitRequest, user: User = Depends(require_csr
             await reject_duplicate_schedule(db, schedule)
             pending.append(schedule)
         except HTTPException as exc:
-            errors.append({"row": index, "error": str(exc.detail)})
+            errors.append({"row": index, "error": _validation_message(exc, "This row was rejected because it conflicts with an existing schedule or failed a check")})
         except Exception as exc:
             errors.append({"row": index, "error": _validation_message(exc)})
     if errors and payload.reject_all:
