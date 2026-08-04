@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -12,6 +13,20 @@ from app.database import Base
 #: the identical suite against the engine the Azure deployment uses:
 #:   $env:TEST_DATABASE_URL="postgresql+asyncpg://user:pw@127.0.0.1:5432/db"
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+
+
+@pytest.fixture(autouse=True)
+def reset_firewall():
+    """The IP allowlist keeps its compiled state in module globals for speed.
+
+    That state would otherwise leak from a test that enables enforcement into every test that runs
+    after it — as a 403 on an unrelated endpoint, which is a miserable thing to debug.
+    """
+    from app import firewall
+
+    firewall.reset_for_tests()
+    yield
+    firewall.reset_for_tests()
 
 
 @pytest_asyncio.fixture

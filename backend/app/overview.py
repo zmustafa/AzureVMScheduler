@@ -260,6 +260,19 @@ def _readiness(
             "link": "/notifications/deliveries",
         })
 
+    # Public ingress with nothing filtering it means every password-guessing bot on the internet
+    # gets to try. Surfaced here because this is the page an operator actually looks at.
+    from . import firewall
+
+    if not firewall.snapshot().active:
+        checks.append({
+            "id": "no_ip_allowlist",
+            "severity": "info",
+            "title": "Anyone on the internet can reach the sign-in page",
+            "detail": "No IP access control is in force. Restrict which addresses may reach the app to remove brute-force exposure entirely.",
+            "link": "/settings/access?tab=firewall",
+        })
+
     return checks
 
 

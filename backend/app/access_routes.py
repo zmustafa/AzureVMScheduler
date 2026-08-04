@@ -7,6 +7,7 @@ changes for them, but the capability can now be delegated to a custom role.
 
 from __future__ import annotations
 
+from datetime import timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -25,14 +26,19 @@ from .access import (
 )
 from .audit import audit
 from .auth import get_security_policy, hash_password, require_csrf, require_permission, validate_password
+from .config import get_settings
 from .connections import encrypt_value
 from .database import get_db
-from . import oidc, saml
-from .models import AccessGroup, IdentityProvider, LoginSession, Role, User, UserAccessGroup, UserRole, new_id, utcnow
+from . import firewall, oidc, saml
+from .models import AccessGroup, IdentityProvider, IpAllowRule, IpBlockEvent, LoginSession, Role, User, UserAccessGroup, UserRole, new_id, utcnow
+from .netaddr import client_ip, parse_network
 from .permissions import PERMISSION_GROUPS, SYSTEM_ROLE_NAMES, unknown_permissions
 from .schemas import (
     AccessGroupInput,
     IdentityProviderInput,
+    IpPolicyUpdate,
+    IpRuleInput,
+    IpRulePatch,
     PasswordReset,
     RoleInput,
     SecurityPolicyUpdate,
@@ -432,8 +438,236 @@ async def update_policies(payload: SecurityPolicyUpdate, actor: User = Depends(r
     return await read_policies(actor, db)
 
 
-# -- identity providers --------------------------------------------------
+# -- IP allowlist --------------------------------------------------------
 
+
+def _utc(value):
+    """Stamp a naive timestamp as UTC before it leaves the API.
+
+    SQLite returns naive datetimes, and a naive ISO string is read by the browser as *local* time —
+    which turned the auto-revert countdown into "in 315 minutes" instead of 15.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _rule_view(rule: IpAllowRule) -> dict[str, Any]:
+    return {
+        "id": rule.id,
+        "cidr": rule.cidr,
+        "label": rule.label,
+        "enabled": rule.enabled,
+        "created_at": _utc(rule.created_at),
+        "updated_at": _utc(rule.updated_at),
+        "last_seen_at": _utc(rule.last_seen_at),
+    }
+
+
+async def _ip_state(db: AsyncSession, request: Request) -> dict[str, Any]:
+    policy = await get_security_policy(db)
+    rules = (await db.scalars(select(IpAllowRule).order_by(IpAllowRule.created_at))).all()
+    caller = client_ip(request)
+    enabled = [rule for rule in rules if rule.enabled]
+    matched = next((rule.id for rule in enabled if firewall.allows(caller, [_network(rule.cidr)] if _network(rule.cidr) else [])), None)
+    bootstrap = firewall.bootstrap_networks()
+    return {
+        "mode": policy.ip_allowlist_mode,
+        "scope": policy.ip_allowlist_scope,
+        "confirm_by": _utc(policy.ip_allowlist_confirm_by),
+        "your_ip": caller,
+        "your_ip_allowed": bool(matched) or firewall.allows(caller, bootstrap),
+        "your_ip_rule_id": matched,
+        "bootstrap_ranges": [str(network) for network in bootstrap],
+        "kill_switch": get_settings().ip_allowlist_disabled,
+        "enabled_rule_count": len(enabled),
+        "rules": [_rule_view(rule) for rule in rules],
+    }
+
+
+def _network(cidr: str):
+    try:
+        return parse_network(cidr)
+    except ValueError:
+        return None
+
+
+def _parse_rule(cidr: str, allow_any: bool) -> str:
+    try:
+        network = parse_network(cidr)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if network.prefixlen == 0 and not allow_any:
+        raise HTTPException(
+            status_code=422,
+            detail="That range allows the entire internet, which defeats the allowlist. Confirm explicitly if you meant it.",
+        )
+    return str(network)
+
+
+async def _assert_caller_not_locked_out(db: AsyncSession, request: Request, *, ignore_rule_id: str | None = None, replacement: str | None = None) -> None:
+    """Refuse a change that would stop the person making it from reaching the app.
+
+    The same shape as the guard that keeps one user holding ``users.manage``: the surest way to
+    make a safety feature dangerous is to let somebody switch it on from outside its own list.
+    """
+    policy = await get_security_policy(db)
+    if policy.ip_allowlist_mode != "enforce":
+        return
+    rules = [rule for rule in (await db.scalars(select(IpAllowRule).where(IpAllowRule.enabled.is_(True)))).all() if rule.id != ignore_rule_id]
+    networks = firewall.compile_rules(rules)
+    if replacement:
+        replacement_network = _network(replacement)
+        if replacement_network is not None:
+            networks.append(replacement_network)
+    if not networks:
+        return  # an empty list fails open, so this cannot lock anyone out
+    caller = client_ip(request)
+    if not firewall.allows(caller, networks):
+        raise HTTPException(status_code=409, detail=f"That change would block your own address ({caller or 'unknown'}). Add it to the allowlist first.")
+
+
+async def _sync_mode_with_rules(db: AsyncSession, actor: User) -> None:
+    """Emptying the list while enforcing turns enforcement off, rather than pretending.
+
+    An empty allowlist fails open by design, so leaving the mode set to `enforce` would show a
+    green "Enforcing" banner over a door that is wide open. Better to say what is true.
+    """
+    policy = await get_security_policy(db)
+    if policy.ip_allowlist_mode != "enforce":
+        return
+    if await db.scalar(select(IpAllowRule.id).where(IpAllowRule.enabled.is_(True)).limit(1)):
+        return
+    if firewall.bootstrap_networks():
+        return
+    policy.ip_allowlist_mode = "disabled"
+    policy.ip_allowlist_confirm_by = None
+    audit(db, actor, "ip_policy.auto_disabled", "security_policy", "1", {"reason": "no allowed ranges remain"})
+
+
+@router.get("/ip-rules")
+async def read_ip_rules(request: Request, user: User = Manage, db: AsyncSession = Depends(get_db)):
+    return await _ip_state(db, request)
+
+
+@router.get("/ip-rules/my-ip")
+async def read_my_ip(request: Request, user: User = Manage):
+    """The address the server actually resolved for this caller.
+
+    Also the diagnostic for `FORWARDED_HOPS`: if this shows a proxy's address rather than yours,
+    the hop count is wrong and every address-based decision is being made on the wrong value.
+    """
+    return {"ip": client_ip(request), "trust_forwarded_headers": get_settings().trust_forwarded_headers, "forwarded_hops": get_settings().forwarded_hops}
+
+
+@router.post("/ip-rules", status_code=201)
+async def create_ip_rule(payload: IpRuleInput, request: Request, actor: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
+    await _assert_manage(actor)
+    cidr = _parse_rule(payload.cidr, payload.allow_any)
+    if await db.scalar(select(IpAllowRule.id).where(IpAllowRule.cidr == cidr)):
+        raise HTTPException(status_code=409, detail=f"{cidr} is already on the list")
+    rule = IpAllowRule(id=new_id(), cidr=cidr, label=payload.label.strip(), enabled=payload.enabled, created_by_user_id=actor.id)
+    db.add(rule)
+    audit(db, actor, "ip_rule.created", "ip_allow_rule", rule.id, {"cidr": cidr, "label": rule.label, "enabled": rule.enabled})
+    await db.commit()
+    await firewall.refresh(db)
+    return _rule_view(rule)
+
+
+@router.patch("/ip-rules/{rule_id}")
+async def update_ip_rule(rule_id: str, payload: IpRulePatch, request: Request, actor: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
+    await _assert_manage(actor)
+    rule = await db.get(IpAllowRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    values = payload.model_dump(exclude_unset=True, exclude={"allow_any"})
+    cidr = _parse_rule(payload.cidr, payload.allow_any) if payload.cidr is not None else rule.cidr
+    still_enabled = values.get("enabled", rule.enabled)
+    await _assert_caller_not_locked_out(db, request, ignore_rule_id=rule_id, replacement=cidr if still_enabled else None)
+    if cidr != rule.cidr and await db.scalar(select(IpAllowRule.id).where(IpAllowRule.cidr == cidr, IpAllowRule.id != rule_id)):
+        raise HTTPException(status_code=409, detail=f"{cidr} is already on the list")
+    rule.cidr = cidr
+    if "label" in values and values["label"] is not None:
+        rule.label = values["label"].strip()
+    if "enabled" in values and values["enabled"] is not None:
+        rule.enabled = values["enabled"]
+    audit(db, actor, "ip_rule.updated", "ip_allow_rule", rule.id, {"cidr": rule.cidr, "label": rule.label, "enabled": rule.enabled})
+    await _sync_mode_with_rules(db, actor)
+    await db.commit()
+    await firewall.refresh(db)
+    return _rule_view(rule)
+
+
+@router.delete("/ip-rules/{rule_id}")
+async def delete_ip_rule(rule_id: str, request: Request, actor: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
+    await _assert_manage(actor)
+    rule = await db.get(IpAllowRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    await _assert_caller_not_locked_out(db, request, ignore_rule_id=rule_id)
+    await db.delete(rule)
+    audit(db, actor, "ip_rule.deleted", "ip_allow_rule", rule_id, {"cidr": rule.cidr})
+    await db.flush()
+    await _sync_mode_with_rules(db, actor)
+    await db.commit()
+    await firewall.refresh(db)
+    return {"ok": True}
+
+
+@router.put("/ip-policy")
+async def update_ip_policy(payload: IpPolicyUpdate, request: Request, actor: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
+    await _assert_manage(actor)
+    policy = await get_security_policy(db)
+    caller = client_ip(request)
+    if payload.mode == "enforce":
+        rules = (await db.scalars(select(IpAllowRule).where(IpAllowRule.enabled.is_(True)))).all()
+        networks = firewall.compile_rules(rules)
+        if not networks:
+            raise HTTPException(status_code=409, detail="Add at least one allowed address before enforcing")
+        if not firewall.allows(caller, networks):
+            raise HTTPException(status_code=409, detail=f"Your address ({caller or 'unknown'}) is not on the list, so enforcing would lock you out. Add it first.")
+    policy.ip_allowlist_mode = payload.mode
+    policy.ip_allowlist_scope = payload.scope
+    # The safety timer only means anything while enforcing; audit mode blocks nothing to recover from.
+    policy.ip_allowlist_confirm_by = (
+        utcnow() + timedelta(minutes=payload.confirm_minutes)
+        if payload.mode == "enforce" and payload.confirm_minutes > 0 else None
+    )
+    audit(db, actor, "ip_policy.updated", "security_policy", "1", {"mode": payload.mode, "scope": payload.scope, "confirm_minutes": payload.confirm_minutes, "actor_ip": caller})
+    await db.commit()
+    await firewall.refresh(db)
+    return await _ip_state(db, request)
+
+
+@router.post("/ip-policy/confirm")
+async def confirm_ip_policy(request: Request, actor: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
+    """Cancel the auto-revert. Reaching this endpoint is itself the proof that access still works."""
+    await _assert_manage(actor)
+    policy = await get_security_policy(db)
+    policy.ip_allowlist_confirm_by = None
+    audit(db, actor, "ip_policy.confirmed", "security_policy", "1", {"actor_ip": client_ip(request)})
+    await db.commit()
+    await firewall.refresh(db)
+    return await _ip_state(db, request)
+
+
+@router.get("/ip-blocks")
+async def read_ip_blocks(user: User = Manage, db: AsyncSession = Depends(get_db)):
+    """Recent refusals, coalesced. In audit mode this is the review queue before enforcing."""
+    rows = (await db.scalars(select(IpBlockEvent).order_by(IpBlockEvent.last_seen_at.desc()).limit(50))).all()
+    return [{
+        "id": row.id,
+        "ip": row.ip,
+        "path_class": row.path_class,
+        "last_path": row.last_path,
+        "hit_count": row.hit_count,
+        "audit_only": row.audit_only,
+        "first_seen_at": _utc(row.first_seen_at),
+        "last_seen_at": _utc(row.last_seen_at),
+    } for row in rows]
+
+
+# -- identity providers --------------------------------------------------
 
 @router.get("/identity-providers")
 async def list_identity_providers(user: User = Manage, db: AsyncSession = Depends(get_db)):

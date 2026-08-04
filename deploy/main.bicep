@@ -72,6 +72,19 @@ param enableRealAzureStarts bool = false
 param enableRealAzureStops bool = false
 
 // ---------------------------------------------------------------------------------------------
+// Edge-level IP restrictions (optional). Empty = unchanged behaviour: ingress accepts traffic
+// from anywhere. Listing CIDRs here filters at the Container Apps ingress, BEFORE a request ever
+// reaches the container, and cannot be spoofed with a forwarded header. The app's own IP access
+// list (Access control -> IP access) is the fine-grained, UI-editable layer on top; keep this one
+// coarse, because recovering from a mistake here needs the Azure control plane:
+//   az containerapp ingress access-restriction remove -n <app> -g <rg> --rule-name <name>
+@description('Optional. Source CIDRs allowed to reach the app at the ingress. Leave empty to accept traffic from anywhere. Example: ["203.0.113.0/24"].')
+param allowedClientIps array = []
+
+@description('Optional. Break-glass CIDRs the application always allows, whatever its own IP access list says. Used to recover from a lock-out without touching the database.')
+param ipAllowlistBootstrap string = ''
+
+// ---------------------------------------------------------------------------------------------
 // Private networking (optional). Choosing "Yes" injects the Container Apps Environment into a
 // VNet and puts BOTH the storage account and the PostgreSQL Flexible Server behind Private
 // Endpoints (no public access to either). NOTE: this is a CREATE-TIME choice — a Container Apps
@@ -433,6 +446,14 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 8000
         transport: 'auto'
         allowInsecure: false
+        // Empty stays absent so the default (accept everything) is preserved. A non-empty list is
+        // an implicit deny for everything else, which is exactly the semantics we want.
+        ipSecurityRestrictions: [for (cidr, index) in allowedClientIps: {
+          name: 'allow-${index}'
+          description: 'Allowed source range'
+          ipAddressRange: cidr
+          action: 'Allow'
+        }]
       }
       secrets: usePrivateRegistry ? [
         {
@@ -514,6 +535,20 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               // per-IP sign-in throttle and the original scheme for HSTS.
               name: 'TRUST_FORWARDED_HEADERS'
               value: 'true'
+            }
+            {
+              // Container Apps ingress is exactly one hop, so the real client is the last entry it
+              // appended to X-Forwarded-For. Raise this if you put anything else in front (Front
+              // Door, an nginx sidecar), or every address-based decision reads the wrong value.
+              name: 'FORWARDED_HOPS'
+              value: '1'
+            }
+            {
+              // Break-glass for the app's IP access list. Environment-only on purpose: an
+              // administrator locked out of the UI restores access by setting this and restarting,
+              // with no database surgery.
+              name: 'IP_ALLOWLIST_BOOTSTRAP'
+              value: ipAllowlistBootstrap
             }
             // Both safety gates ship off. Turn them on only after reviewing the estate; each is
             // still ANDed with the per-tenant permission set inside the app.

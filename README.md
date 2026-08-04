@@ -243,6 +243,7 @@ vm_attempts    -> one row per VM inside a run
 | `vm_attempts` | Per-VM outcome: `action`, `stop_mode`, `status`, `mode`, `message`, `attempt_number`, `sequence`, `correlation_id`, timestamps |
 | `import_batches`, `audit_logs`, `users`, `login_sessions`, `security_policy` | Supporting tables |
 | `roles`, `access_groups`, `user_roles`, `user_access_groups`, `identity_providers` | Access control: capability sets, role bundles, their assignments, and SSO directories |
+| `ip_allow_rules`, `ip_block_events` | IP access control: allowed source ranges, and coalesced refusals |
 
 ### Resolution rules
 
@@ -443,15 +444,45 @@ Three protections are enforced on the API, not just in the UI, so a scripted cli
 | `noaccess` | A principal with zero effective permissions is refused every path except self and sign-out. This is what makes `noaccess` the safe default for auto-provisioned users. |
 | `must_change_password` | Blocks every path except changing the password, so a fresh deployment cannot be driven while still on its bootstrap credential. |
 | Per-IP throttle | Counts failed sign-ins per source over a sliding window and locks that address out for a cooldown — catching one attacker spraying many usernames, which no single account lockout would notice. Configurable under Policies. |
+| IP access list | Refuses requests from source addresses that are not on an allowlist, before routing, session lookup or password verification. See below. |
 
 Writes also require a matching CSRF token **and** a same-origin `Origin`/`Referer`, and every response
 carries `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options`, `Referrer-Policy`
 and `Permissions-Policy`.
 
+### IP access control
+
+Throttling blunts brute force; not receiving the attempt at all removes it. **Access control → IP
+access** restricts which source addresses may reach the app, in three modes — `disabled`, `audit`
+(record what would be refused, refuse nothing) and `enforce` — across two scopes: `auth_only`, the
+credential surface only, or `all`, every request including the UI. Health probes are never filtered.
+
+Rules are IPv4/IPv6 addresses or CIDR ranges, stored normalized (a bare address becomes `/32` or
+`/128`), so a rule can never read differently from how it behaves. The compiled list lives in memory
+and is recompiled after every write, so a blocked request costs no database work at all; refusals
+accumulate in a bounded buffer that the scheduler drains into coalesced `ip_block_events` rows.
+
+Because the danger of this feature is locking yourself out, it fails open at every turn:
+
+| Layer | Behaviour |
+| --- | --- |
+| Guard | Enabling `enforce`, or removing the rule that admits you, is refused with `409` when the result would block your own address. |
+| Empty list | `enforce` with no enabled rules filters nothing, and the mode reverts to `disabled` rather than showing an "Enforcing" banner over an open door. |
+| Commit-confirm | Enabling enforcement arms a 15-minute timer; unless you confirm from the page, it reverts to `audit` by itself. Recovery with no Azure access at all. |
+| Break-glass | `IP_ALLOWLIST_BOOTSTRAP` (always-allowed CIDRs) and `IP_ALLOWLIST_DISABLED` (kill switch) are environment-only, so a container restart always restores access. |
+
+Behind a proxy the client address is read `FORWARDED_HOPS` entries from the **right** of
+`X-Forwarded-For` (default 1, correct for Container Apps ingress), because each hop appends — reading
+the leftmost entry would let any client forge its own address. `GET /api/access/ip-rules/my-ip`
+reports what the server resolved, which is the diagnostic if the hop count is wrong.
+
+For defence in depth, `deploy/main.bicep` also accepts an optional `allowedClientIps` array that
+filters at the Container Apps ingress, before traffic reaches the container.
+
 ### Roles and capabilities
 
 Everything lives on one page, **Access control** (`/access`), gated on the `users.manage` capability,
-with six tabs: Users, Roles, Access groups, Sessions, Policies, and Sign-in & SSO.
+with seven tabs: Users, Roles, Access groups, Sessions, Policies, IP access, and Sign-in & SSO.
 
 Authorization is capability-based. A user holds any number of **roles**, directly or through an
 **access group**; their effective permissions are the union of all of them, resolved once per request.
@@ -498,7 +529,7 @@ after 5 failures for 15 minutes; 60-minute idle and 12-hour absolute session lim
 | Import VMs | `/import` | Preview and commit the inventory CSV |
 | Azure Tenants | `/settings/tenants` | Tenant registry, test, discover subscriptions, resolve VM names, live VM discovery |
 | Settings | `/settings` | Default timezone, scheduler tuning, backup & restore, demo data, danger zone |
-| Access control | `/access` | Users, roles, access groups, sessions, security policy, sign-in & SSO |
+| Access control | `/access` | Users, roles, access groups, sessions, security policy, IP access list, sign-in & SSO |
 | Audit log | `/audit` | Filterable audit history |
 
 Navigation entries are hidden when the signed-in user lacks the matching permission.
@@ -635,6 +666,10 @@ The most-used environment variables — see `.env.example` for the full list:
 | `DEFAULT_TIMEZONE` | `America/New_York` | Default IANA zone for new schedules |
 | `APP_BASE_URL` | — | Used for `{{run_url}}` in notifications and for SSO redirect URIs |
 | `ALLOWED_RETURN_ORIGINS` | — | Origins a sign-in is allowed to return to |
+| `TRUST_FORWARDED_HEADERS` | `false` | Believe `X-Forwarded-For`/`X-Forwarded-Proto`. Only true behind a trusted proxy |
+| `FORWARDED_HOPS` | `1` | Proxies in front of the app; the client address is read this many entries from the **right** of `X-Forwarded-For` |
+| `IP_ALLOWLIST_BOOTSTRAP` | — | Break-glass CIDRs the IP access list always allows |
+| `IP_ALLOWLIST_DISABLED` | `false` | Kill switch that bypasses IP access control entirely |
 
 Plus the scheduler tuning table above and the delivery knobs `CONNECTOR_HTTP_TIMEOUT_SECONDS`,
 `SMTP_TIMEOUT_SECONDS`, `DELIVERY_CONCURRENCY`, `DELIVERY_MAX_ATTEMPTS`,

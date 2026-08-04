@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
-import { KeyRound, MonitorSmartphone, ShieldCheck, Trash2, Users, UsersRound } from 'lucide-react'
+import { useSearchParams } from 'react-router'
+import { KeyRound, MonitorSmartphone, ShieldBan, ShieldCheck, Trash2, Users, UsersRound } from 'lucide-react'
 
 import { api, json } from '../api'
 import { useAuth } from '../auth'
@@ -16,12 +16,17 @@ import type {
   AuthPolicies,
   IdentityProvider,
   IdpTestResult,
+  IpAccessState,
+  IpAllowlistMode,
+  IpAllowlistScope,
+  IpBlockEvent,
+  IpRule,
   LoginSession,
   PermissionCatalogItem,
   ProviderType,
 } from '../types'
 
-type Tab = 'users' | 'roles' | 'groups' | 'sessions' | 'policies' | 'sso'
+type Tab = 'users' | 'roles' | 'groups' | 'sessions' | 'policies' | 'firewall' | 'sso'
 
 const TABS: { key: Tab; label: string; icon: typeof Users }[] = [
   { key: 'users', label: 'Users', icon: Users },
@@ -29,6 +34,7 @@ const TABS: { key: Tab; label: string; icon: typeof Users }[] = [
   { key: 'groups', label: 'Access groups', icon: UsersRound },
   { key: 'sessions', label: 'Sessions', icon: MonitorSmartphone },
   { key: 'policies', label: 'Policies', icon: KeyRound },
+  { key: 'firewall', label: 'IP access', icon: ShieldBan },
   { key: 'sso', label: 'Sign-in & SSO', icon: KeyRound },
 ]
 
@@ -40,6 +46,8 @@ const keys = {
   policies: ['access', 'policies'],
   providers: ['access', 'identity-providers'],
   permissions: ['access', 'permissions'],
+  ipAccess: ['access', 'ip-rules'],
+  ipBlocks: ['access', 'ip-blocks'],
 } as const
 
 function useInvalidate() {
@@ -748,8 +756,225 @@ function GroupRoleMap({ value, roles, onChange }: { value: Record<string, string
   </div>
 }
 
-// -- page ----------------------------------------------------------------
+// -- IP access -----------------------------------------------------------
 
+const MODE_CARDS: { key: IpAllowlistMode; label: string; blurb: string }[] = [
+  { key: 'disabled', label: 'Off', blurb: 'No filtering. Any address on the internet may reach the app.' },
+  { key: 'audit', label: 'Audit', blurb: 'Record what would be refused, refuse nothing. The safe first step.' },
+  { key: 'enforce', label: 'Enforce', blurb: 'Refuse anything that is not on the list below.' },
+]
+
+const SCOPE_CARDS: { key: IpAllowlistScope; label: string; blurb: string }[] = [
+  { key: 'auth_only', label: 'Sign-in only', blurb: 'Login, password change and SSO. Everything else stays reachable.' },
+  { key: 'all', label: 'Entire application', blurb: 'Every request, including the web interface itself.' },
+]
+
+/** "in 12 minutes", for the commit-confirm countdown. */
+function untilText(iso: string): string {
+  const seconds = Math.round((new Date(iso).getTime() - Date.now()) / 1000)
+  if (seconds <= 0) return 'any moment now'
+  const minutes = Math.floor(seconds / 60)
+  return minutes >= 1 ? `in ${minutes} minute${minutes === 1 ? '' : 's'}` : `in ${seconds} seconds`
+}
+
+function FirewallTab() {
+  const invalidate = useInvalidate()
+  const { format } = useDisplayTimezone()
+  const state = useQuery({
+    queryKey: [...keys.ipAccess],
+    queryFn: () => api<IpAccessState>('/access/ip-rules'),
+    // The auto-revert countdown has to stay honest without a reload.
+    refetchInterval: 30_000,
+  })
+  const blocks = useQuery({ queryKey: [...keys.ipBlocks], queryFn: () => api<IpBlockEvent[]>('/access/ip-blocks') })
+  const [draft, setDraft] = useState<{ mode: IpAllowlistMode; scope: IpAllowlistScope } | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const [adding, setAdding] = useState<{ cidr: string; label: string } | null>(null)
+  const [removing, setRemoving] = useState<IpRule | null>(null)
+  const [showBlocks, setShowBlocks] = useState(false)
+
+  const after = () => { invalidate(keys.ipAccess); invalidate(keys.ipBlocks); setDraft(null); setConfirming(false); setAdding(null); setRemoving(null) }
+  const savePolicy = useMutation({
+    mutationFn: (body: { mode: IpAllowlistMode; scope: IpAllowlistScope; confirm_minutes: number }) => api<IpAccessState>('/access/ip-policy', json('PUT', body)),
+    onSuccess: after,
+  })
+  const confirmPolicy = useMutation({ mutationFn: () => api<IpAccessState>('/access/ip-policy/confirm', json('POST')), onSuccess: after })
+  const addRule = useMutation({ mutationFn: (body: { cidr: string; label: string }) => api<IpRule>('/access/ip-rules', json('POST', body)), onSuccess: after })
+  const toggleRule = useMutation({ mutationFn: (input: { id: string; enabled: boolean }) => api<IpRule>(`/access/ip-rules/${input.id}`, json('PATCH', { enabled: input.enabled })), onSuccess: after })
+  const removeRule = useMutation({ mutationFn: (id: string) => api(`/access/ip-rules/${id}`, json('DELETE')), onSuccess: after })
+
+  if (state.isLoading || !state.data) return <Loading />
+  const data = state.data
+  const values = draft ?? { mode: data.mode, scope: data.scope }
+  const dirty = values.mode !== data.mode || values.scope !== data.scope
+  const error = state.error ?? savePolicy.error ?? confirmPolicy.error ?? addRule.error ?? toggleRule.error ?? removeRule.error
+  const enforcing = data.mode === 'enforce'
+  const auditing = data.mode === 'audit'
+  const wouldBlock = blocks.data?.filter((item) => item.audit_only).reduce((total, item) => total + item.hit_count, 0) ?? 0
+
+  const applyPolicy = () => {
+    if (values.mode === 'enforce' && data.mode !== 'enforce') { setConfirming(true); return }
+    savePolicy.mutate({ ...values, confirm_minutes: 0 })
+  }
+
+  const banner = data.kill_switch
+    ? { tone: 'border-amber-200 bg-amber-50 text-amber-900', text: 'A kill switch in the environment (IP_ALLOWLIST_DISABLED) is overriding every setting on this page. Nothing is being filtered.' }
+    : enforcing
+      ? { tone: 'border-emerald-200 bg-emerald-50 text-emerald-900', text: `Enforcing. ${data.enabled_rule_count} allowed range${data.enabled_rule_count === 1 ? '' : 's'} · scope: ${data.scope === 'all' ? 'entire application' : 'sign-in only'}.` }
+      : auditing
+        ? { tone: 'border-amber-200 bg-amber-50 text-amber-900', text: `Audit only. Nothing is being refused${wouldBlock ? `; ${wouldBlock} request${wouldBlock === 1 ? '' : 's'} would have been` : ''}.` }
+        : { tone: 'border-slate-200 bg-slate-50 text-slate-700', text: 'IP access control is off. Anyone on the internet can reach the sign-in page and attempt to authenticate.' }
+
+  return <div className="space-y-4">
+    <p className="muted">Restrict which source addresses may reach this application. The surest defence against password guessing is never receiving the attempt.</p>
+    {error && <ErrorNotice error={error} />}
+
+    <div className={`flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm ${banner.tone}`}>
+      <span>{banner.text}</span>
+      <span className="flex items-center gap-2">
+        <span className="text-xs opacity-80">Your address</span>
+        <code className="font-mono text-xs">{data.your_ip ?? 'unknown'}</code>
+        {data.your_ip_allowed
+          ? <Chip tone="success">on the list</Chip>
+          : <Chip tone="danger">not on the list</Chip>}
+      </span>
+    </div>
+
+    {/* Commit-confirm: the recovery path that needs no Azure access at all. */}
+    {data.confirm_by && <Callout tone="warn" title="Confirm you can still reach the app">
+      Enforcement reverts to audit {untilText(data.confirm_by)} unless you confirm. You are reading this page, so access works — confirming now keeps it on.
+      <div className="mt-2">
+        <button type="button" className="btn-primary !py-1" disabled={confirmPolicy.isPending} onClick={() => confirmPolicy.mutate()}>Keep enforcement on</button>
+      </div>
+    </Callout>}
+
+    <section className="card space-y-4">
+      <div>
+        <p className="text-sm font-semibold text-slate-800">Mode</p>
+        <div className="mt-2 grid gap-2 md:grid-cols-3">
+          {MODE_CARDS.map((card) => <label key={card.key} className={`cursor-pointer rounded-lg border p-3 transition ${values.mode === card.key ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}>
+            <span className="flex items-center gap-2">
+              <input type="radio" className="!w-auto" name="ip-mode" checked={values.mode === card.key} onChange={() => setDraft({ ...values, mode: card.key })} />
+              <span className="text-sm font-medium text-slate-800">{card.label}</span>
+              {card.key === 'audit' && <Chip tone="info">recommended first</Chip>}
+            </span>
+            <span className="mt-1 block text-xs text-slate-600">{card.blurb}</span>
+          </label>)}
+        </div>
+      </div>
+
+      <div>
+        <p className="text-sm font-semibold text-slate-800">Scope</p>
+        <div className="mt-2 grid gap-2 md:grid-cols-2">
+          {SCOPE_CARDS.map((card) => <label key={card.key} className={`cursor-pointer rounded-lg border p-3 transition ${values.mode === 'disabled' ? 'opacity-50' : ''} ${values.scope === card.key ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}>
+            <span className="flex items-center gap-2">
+              <input type="radio" className="!w-auto" name="ip-scope" disabled={values.mode === 'disabled'} checked={values.scope === card.key} onChange={() => setDraft({ ...values, scope: card.key })} />
+              <span className="text-sm font-medium text-slate-800">{card.label}</span>
+            </span>
+            <span className="mt-1 block text-xs text-slate-600">{card.blurb}</span>
+          </label>)}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-3 border-t border-slate-200 pt-4">
+        <button type="button" className="btn-primary" disabled={!dirty || savePolicy.isPending} onClick={applyPolicy}>{savePolicy.isPending ? 'Saving…' : 'Save'}</button>
+        {dirty && <button type="button" className="btn-secondary" onClick={() => setDraft(null)}>Cancel</button>}
+      </div>
+    </section>
+
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm font-semibold text-slate-800">Allowed addresses</p>
+        <div className="flex gap-2">
+          {data.your_ip && !data.your_ip_allowed && <button type="button" className="btn-secondary" onClick={() => setAdding({ cidr: data.your_ip ?? '', label: 'My current address' })}>Add my current IP</button>}
+          {!adding && <button type="button" className="btn-primary" onClick={() => setAdding({ cidr: '', label: '' })}>Add range</button>}
+        </div>
+      </div>
+
+      {adding && <div className="card grid gap-3 md:grid-cols-[1fr_1.5fr_auto] md:items-end">
+        <Field label="Address or range" hint="A bare address is stored as a single host, e.g. 203.0.113.4/32.">
+          <input value={adding.cidr} autoFocus onChange={(event) => setAdding({ ...adding, cidr: event.target.value })} placeholder="203.0.113.0/24" />
+        </Field>
+        <Field label="Label" hint="Who or where this is, so it can be retired confidently later.">
+          <input value={adding.label} onChange={(event) => setAdding({ ...adding, label: event.target.value })} placeholder="Head office VPN" />
+        </Field>
+        <div className="flex gap-2 pb-1">
+          <button type="button" className="btn-primary" disabled={!adding.cidr.trim() || addRule.isPending} onClick={() => addRule.mutate({ cidr: adding.cidr.trim(), label: adding.label.trim() })}>Add</button>
+          <button type="button" className="btn-secondary" onClick={() => setAdding(null)}>Cancel</button>
+        </div>
+      </div>}
+
+      {data.rules.length === 0
+        ? <div className="surface p-6 text-center">
+            <p className="text-sm font-medium text-slate-800">No addresses allowed yet</p>
+            <p className="mt-1 text-xs text-slate-500">Add your own address first — enforcement cannot be turned on from an address that is not on the list.</p>
+          </div>
+        : <div className="surface divide-y divide-slate-200">
+            {data.rules.map((rule) => {
+              const mine = rule.id === data.your_ip_rule_id
+              return <div key={rule.id} className={`grid gap-3 p-4 md:grid-cols-[1fr_1.2fr_1fr_auto] md:items-center ${mine ? 'border-l-4 border-l-emerald-500' : ''}`}>
+                <p className="flex items-center gap-2 font-mono text-sm text-slate-900">{rule.cidr}{mine && <Chip tone="success">you</Chip>}</p>
+                <p className="truncate text-sm text-slate-600">{rule.label || <span className="text-slate-400">No label</span>}</p>
+                <p className="text-xs text-slate-500">{rule.last_seen_at ? `Last used ${format(rule.last_seen_at)}` : 'Never used'}</p>
+                <div className="flex justify-end gap-2">
+                  <button type="button" className="btn-secondary !py-1" disabled={toggleRule.isPending} onClick={() => toggleRule.mutate({ id: rule.id, enabled: !rule.enabled })}>{rule.enabled ? 'Disable' : 'Enable'}</button>
+                  <button type="button" className="btn-secondary !py-1" aria-label={`Delete ${rule.cidr}`} onClick={() => setRemoving(rule)}><Trash2 size={14} /></button>
+                </div>
+              </div>
+            })}
+          </div>}
+
+      {data.bootstrap_ranges.length > 0 && <Callout tone="neutral" title="Always allowed by the environment">
+        {data.bootstrap_ranges.join(', ')} — set through IP_ALLOWLIST_BOOTSTRAP. These cannot be edited here, which is what makes them a way back in.
+      </Callout>}
+    </section>
+
+    <section className="surface">
+      <button type="button" className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm font-semibold text-slate-800" aria-expanded={showBlocks || auditing} onClick={() => setShowBlocks(!showBlocks)}>
+        Recent refusals
+        <span className="text-xs font-normal text-slate-500">{blocks.data?.length ?? 0} source{(blocks.data?.length ?? 0) === 1 ? '' : 's'}</span>
+      </button>
+      {(showBlocks || auditing) && <div className="divide-y divide-slate-200 border-t border-slate-200">
+        {(blocks.data ?? []).length === 0 && <p className="p-4 text-sm text-slate-500">Nothing has been refused.</p>}
+        {(blocks.data ?? []).map((item) => <div key={item.id} className="grid gap-3 p-4 md:grid-cols-[1fr_1fr_1fr_auto] md:items-center">
+          <p className="flex items-center gap-2 font-mono text-sm text-slate-900">{item.ip}{item.audit_only && <Chip tone="warn">audit</Chip>}</p>
+          <p className="text-sm text-slate-600">{item.hit_count} request{item.hit_count === 1 ? '' : 's'} · {item.path_class}</p>
+          <p className="text-xs text-slate-500">Last {format(item.last_seen_at)}</p>
+          <button type="button" className="btn-secondary !py-1" onClick={() => setAdding({ cidr: item.ip, label: '' })}>Allow this address</button>
+        </div>)}
+      </div>}
+    </section>
+
+    <ConfirmDialog
+      open={confirming}
+      title="Turn on enforcement?"
+      tone={data.your_ip_allowed ? 'primary' : 'danger'}
+      confirmLabel="Enforce with a 15 minute safety timer"
+      confirmDisabled={!data.your_ip_allowed || savePolicy.isPending}
+      busy={savePolicy.isPending}
+      onCancel={() => setConfirming(false)}
+      onConfirm={() => savePolicy.mutate({ ...values, confirm_minutes: 15 })}
+    >
+      {data.your_ip_allowed
+        ? <>Requests from addresses other than the {data.enabled_rule_count} allowed range{data.enabled_rule_count === 1 ? '' : 's'} will be refused. Your address <code className="font-mono">{data.your_ip}</code> is on the list.
+            <p className="mt-2">Enforcement reverts to audit automatically after 15 minutes unless you confirm on this page, so a mistake cannot lock you out.</p></>
+        : <>Your address <code className="font-mono">{data.your_ip ?? 'unknown'}</code> is not on the list, so enforcing would lock you out immediately. Add it first.</>}
+    </ConfirmDialog>
+
+    <ConfirmDialog
+      open={!!removing}
+      title={`Delete ${removing?.cidr ?? ''}?`}
+      confirmLabel="Delete"
+      busy={removeRule.isPending}
+      onCancel={() => setRemoving(null)}
+      onConfirm={() => removing && removeRule.mutate(removing.id)}
+    >
+      Requests from this range will no longer be allowed while enforcement is on.
+    </ConfirmDialog>
+  </div>
+}
+
+// -- page ----------------------------------------------------------------
 const TAB_KEYS = TABS.map((item) => item.key)
 
 export function AccessControlPage() {
@@ -787,6 +1012,7 @@ export function AccessControlPage() {
     {tab === 'groups' && <GroupsTab />}
     {tab === 'sessions' && <SessionsTab />}
     {tab === 'policies' && <PoliciesTab />}
+    {tab === 'firewall' && <FirewallTab />}
     {tab === 'sso' && <SsoTab />}
   </>
 }

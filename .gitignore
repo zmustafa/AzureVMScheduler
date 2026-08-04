@@ -36,3 +36,6 @@ frontend/dist/
 # under .github/ too. Narrow to `.github/agents/` if you later want CI or shared instructions.
 .github/
 UITestAgent.md
+
+# Internal design and improvement notes — not part of the published repository.
+docs/improvement-plans/

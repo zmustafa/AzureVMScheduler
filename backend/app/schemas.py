@@ -135,6 +135,34 @@ class PasswordReset(BaseModel):
     new_password: str = Field(min_length=1, max_length=1000)
 
 
+class IpRuleInput(BaseModel):
+    """An allowed address or range.
+
+    `allow_any` exists so that "let the whole internet in" cannot be typed by accident: a rule of
+    ``0.0.0.0/0`` silently defeats the feature, so it has to be asked for twice.
+    """
+
+    cidr: str = Field(min_length=1, max_length=64)
+    label: str = Field(default="", max_length=200)
+    enabled: bool = True
+    allow_any: bool = False
+
+
+class IpRulePatch(BaseModel):
+    cidr: str | None = Field(default=None, max_length=64)
+    label: str | None = Field(default=None, max_length=200)
+    enabled: bool | None = None
+    allow_any: bool = False
+
+
+class IpPolicyUpdate(BaseModel):
+    mode: Literal["disabled", "audit", "enforce"]
+    scope: Literal["auth_only", "all"] = "auth_only"
+    #: Minutes before unconfirmed enforcement reverts to audit. 0 disables the safety timer, which
+    #: is only sensible once you are certain the list is right.
+    confirm_minutes: int = Field(default=15, ge=0, le=1440)
+
+
 class GroupInput(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     parent_id: str | None = None

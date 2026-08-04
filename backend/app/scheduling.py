@@ -16,6 +16,7 @@ from .azure import AzurePermanentError, AzureTransientError, get_vm_adapter, res
 from .config import get_settings
 from .connections import get_connection
 from .database import SessionLocal
+from . import firewall
 from .hierarchy import effective_connection_id, is_stop_protected, load_schedule_index, load_tree, resolve_schedule_vms
 from .models import AuditLog, Schedule, ScheduleRun, SecurityPolicy, VirtualMachine, VmAttempt, new_id, utcnow
 from .notifications import publish, run_daily_digests
@@ -422,6 +423,9 @@ class SchedulerService:
                 async with SessionLocal() as session:
                     await detect_missed_runs(session)
                     await run_daily_digests(session)
+                    # The IP allowlist keeps its state in memory and its block log out of the
+                    # request path; this is where both are reconciled with the database.
+                    await firewall.maintain(session)
                     for schedule_id in await claim_due_schedules(session, self.worker_id):
                         schedule = await session.get(Schedule, schedule_id)
                         if not schedule:

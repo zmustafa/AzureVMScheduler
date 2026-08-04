@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "4582342369116669221"
+      "templateHash": "14970701540935789167"
     }
   },
   "parameters": {
@@ -131,6 +131,20 @@
       "defaultValue": false,
       "metadata": {
         "description": "Allow the scheduler to stop REAL Azure virtual machines. Deliberately separate from starts: a wrong start costs money, a wrong stop causes an outage."
+      }
+    },
+    "allowedClientIps": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Optional. Source CIDRs allowed to reach the app at the ingress. Leave empty to accept traffic from anywhere. Example: [\"203.0.113.0/24\"]."
+      }
+    },
+    "ipAllowlistBootstrap": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional. Break-glass CIDRs the application always allows, whatever its own IP access list says. Used to recover from a lock-out without touching the database."
       }
     },
     "privateNetworking": {
@@ -527,6 +541,18 @@
         "environmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('environmentName'))]",
         "configuration": {
           "ingress": {
+            "copy": [
+              {
+                "name": "ipSecurityRestrictions",
+                "count": "[length(parameters('allowedClientIps'))]",
+                "input": {
+                  "name": "[format('allow-{0}', copyIndex('ipSecurityRestrictions'))]",
+                  "description": "Allowed source range",
+                  "ipAddressRange": "[parameters('allowedClientIps')[copyIndex('ipSecurityRestrictions')]]",
+                  "action": "Allow"
+                }
+              }
+            ],
             "external": true,
             "targetPort": 8000,
             "transport": "auto",
@@ -568,6 +594,14 @@
                 {
                   "name": "TRUST_FORWARDED_HEADERS",
                   "value": "true"
+                },
+                {
+                  "name": "FORWARDED_HOPS",
+                  "value": "1"
+                },
+                {
+                  "name": "IP_ALLOWLIST_BOOTSTRAP",
+                  "value": "[parameters('ipAllowlistBootstrap')]"
                 },
                 {
                   "name": "ENABLE_REAL_AZURE_STARTS",

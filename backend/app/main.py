@@ -58,7 +58,7 @@ from .connectors.registry import (
     upsert_connector,
 )
 from .csv_import import validate_csv
-from .database import engine, get_db, initialize_database, ping_database
+from .database import SessionLocal, engine, get_db, initialize_database, ping_database
 from .delivery import delivery_service
 from .hierarchy import (
     GroupTree,
@@ -78,7 +78,7 @@ from .hierarchy import (
 from .models import AuditLog, Group, IdentityProvider, ImportBatch, LoginSession, NotificationDelivery, NotificationEvent, NotificationRule, Schedule, ScheduleRun, SecurityPolicy, User, VirtualMachine, VmAttempt, new_id, utcnow
 from .notifications import EVENT_TYPES, publish, unread_count
 from .overview import build_overview
-from . import ip_lockout, oidc, saml
+from . import firewall, ip_lockout, oidc, saml
 from .oidc import validate_return_url
 from .provisioning import ProvisioningError, provision_sso_user
 from .schemas import (
@@ -146,6 +146,9 @@ async def lifespan(_: FastAPI):
     await initialize_database()
     await bootstrap_admin()
     await bootstrap_access()
+    # Compile the IP allowlist before the first request, so enforcement is never briefly absent.
+    async with SessionLocal() as session:
+        await firewall.refresh(session)
     await delivery_service.start()
     await scheduler.start()
     yield
@@ -195,6 +198,19 @@ async def security_headers(request: Request, call_next):
     if over_https:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     return response
+
+
+#: Registered after `security_headers`, which makes it the *outermost* layer: Starlette wraps each
+#: new middleware around the previous one. A refused request therefore costs no routing, no session
+#: lookup and no password verification — which is the entire point of filtering by address.
+@app.middleware("http")
+async def ip_allowlist(request: Request, call_next):
+    decision = firewall.evaluate(request)
+    if not decision.allowed:
+        # Deliberately terse. Confirming that an allowlist exists, or which one, tells an attacker
+        # what to spoof; a plain 403 tells them nothing they did not already know.
+        return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+    return await call_next(request)
 
 
 def user_view(user: User) -> dict[str, Any]:

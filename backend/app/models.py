@@ -81,9 +81,63 @@ class SecurityPolicy(Base):
     allow_self_registration: Mapped[bool] = mapped_column(Boolean, default=False)
     session_idle_minutes: Mapped[int] = mapped_column(Integer, default=60)
     session_absolute_hours: Mapped[int] = mapped_column(Integer, default=12)
+    #: Network-level admission control. `disabled` filters nothing, `audit` records what would
+    #: have been refused without refusing it, `enforce` refuses. Off by default: turning it on
+    #: from a machine that is not on the list would lock the operator out.
+    ip_allowlist_mode: Mapped[str] = mapped_column(String(16), default="disabled")
+    #: `auth_only` covers the credential surface (sign-in, password change, SSO start), which is
+    #: what brute force targets. `all` covers every request including the UI itself.
+    ip_allowlist_scope: Mapped[str] = mapped_column(String(16), default="auth_only")
+    #: Commit-confirm, borrowed from network gear: enforcement reverts to `audit` at this instant
+    #: unless someone confirms they can still reach the app. The recovery path that needs no
+    #: Azure access at all.
+    ip_allowlist_confirm_by: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     schedule_missed_grace_seconds: Mapped[int] = mapped_column(Integer, default=300)
     default_timezone: Mapped[str] = mapped_column(String(100), default="America/New_York")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class IpAllowRule(Base):
+    """One allowed address or range.
+
+    `cidr` is always stored normalized (`netaddr.parse_network`), so a rule can never read
+    differently from how it behaves and duplicates cannot sneak in as `10.0.0.5/24` beside
+    `10.0.0.0/24`.
+    """
+
+    __tablename__ = "ip_allow_rules"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    cidr: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    label: Mapped[str] = mapped_column(String(200), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    #: Last time a request matched this rule, so a range nobody uses any more is obvious.
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class IpBlockEvent(Base):
+    """A refused (or, in audit mode, would-be-refused) source, coalesced.
+
+    One row per address per window rather than per request: an unauthenticated attacker controls
+    how many requests they send, so a row per request would turn this table into an amplification
+    target. Pruned after a week.
+    """
+
+    __tablename__ = "ip_block_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    ip: Mapped[str] = mapped_column(String(64), index=True)
+    #: `sign-in`, `api` or `ui` — enough to explain the block without storing full paths.
+    path_class: Mapped[str] = mapped_column(String(16), default="api")
+    last_path: Mapped[str] = mapped_column(String(200), default="")
+    hit_count: Mapped[int] = mapped_column(Integer, default=1)
+    #: True when the mode was `audit`, i.e. the request was allowed through and only recorded.
+    audit_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 class LoginThrottle(Base):

@@ -61,6 +61,51 @@ export type AuthPolicies = {
   allow_self_registration: boolean
 }
 
+/* ---------------------------------------------------------------- IP access control */
+
+/** `audit` records what would be refused without refusing it; `enforce` refuses. */
+export type IpAllowlistMode = 'disabled' | 'audit' | 'enforce'
+/** `auth_only` covers the credential surface; `all` covers every request including the UI. */
+export type IpAllowlistScope = 'auth_only' | 'all'
+
+export type IpRule = {
+  id: string
+  /** Always normalized, so a bare address reads as `/32` (or `/128` for IPv6). */
+  cidr: string
+  label: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+  /** Last request that matched this rule, so a range nobody uses is obvious. */
+  last_seen_at: string | null
+}
+
+export type IpAccessState = {
+  mode: IpAllowlistMode
+  scope: IpAllowlistScope
+  /** When set, enforcement reverts to audit at this instant unless it is confirmed. */
+  confirm_by: string | null
+  your_ip: string | null
+  your_ip_allowed: boolean
+  your_ip_rule_id: string | null
+  /** Environment-only ranges that are always allowed and cannot be edited here. */
+  bootstrap_ranges: string[]
+  kill_switch: boolean
+  enabled_rule_count: number
+  rules: IpRule[]
+}
+
+export type IpBlockEvent = {
+  id: string
+  ip: string
+  path_class: string
+  last_path: string
+  hit_count: number
+  audit_only: boolean
+  first_seen_at: string
+  last_seen_at: string
+}
+
 /** `entra` is OIDC with the issuer derived from a directory id; `oidc` is any other issuer. */
 export type ProviderType = 'entra' | 'oidc' | 'saml'
 
