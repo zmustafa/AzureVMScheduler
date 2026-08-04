@@ -18,7 +18,6 @@ import type {
   IdpTestResult,
   IpAccessState,
   IpAllowlistMode,
-  IpAllowlistScope,
   IpBlockEvent,
   IpRule,
   LoginSession,
@@ -764,11 +763,6 @@ const MODE_CARDS: { key: IpAllowlistMode; label: string; blurb: string }[] = [
   { key: 'enforce', label: 'Enforce', blurb: 'Refuse anything that is not on the list below.' },
 ]
 
-const SCOPE_CARDS: { key: IpAllowlistScope; label: string; blurb: string }[] = [
-  { key: 'auth_only', label: 'Sign-in only', blurb: 'Login, password change and SSO. Everything else stays reachable.' },
-  { key: 'all', label: 'Entire application', blurb: 'Every request, including the web interface itself.' },
-]
-
 /** "in 12 minutes", for the commit-confirm countdown. */
 function untilText(iso: string): string {
   const seconds = Math.round((new Date(iso).getTime() - Date.now()) / 1000)
@@ -787,7 +781,7 @@ function FirewallTab() {
     refetchInterval: 30_000,
   })
   const blocks = useQuery({ queryKey: [...keys.ipBlocks], queryFn: () => api<IpBlockEvent[]>('/access/ip-blocks') })
-  const [draft, setDraft] = useState<{ mode: IpAllowlistMode; scope: IpAllowlistScope } | null>(null)
+  const [draft, setDraft] = useState<IpAllowlistMode | null>(null)
   const [confirming, setConfirming] = useState(false)
   const [adding, setAdding] = useState<{ cidr: string; label: string } | null>(null)
   const [removing, setRemoving] = useState<IpRule | null>(null)
@@ -795,7 +789,7 @@ function FirewallTab() {
 
   const after = () => { invalidate(keys.ipAccess); invalidate(keys.ipBlocks); setDraft(null); setConfirming(false); setAdding(null); setRemoving(null) }
   const savePolicy = useMutation({
-    mutationFn: (body: { mode: IpAllowlistMode; scope: IpAllowlistScope; confirm_minutes: number }) => api<IpAccessState>('/access/ip-policy', json('PUT', body)),
+    mutationFn: (body: { mode: IpAllowlistMode; confirm_minutes: number }) => api<IpAccessState>('/access/ip-policy', json('PUT', body)),
     onSuccess: after,
   })
   const confirmPolicy = useMutation({ mutationFn: () => api<IpAccessState>('/access/ip-policy/confirm', json('POST')), onSuccess: after })
@@ -805,22 +799,22 @@ function FirewallTab() {
 
   if (state.isLoading || !state.data) return <Loading />
   const data = state.data
-  const values = draft ?? { mode: data.mode, scope: data.scope }
-  const dirty = values.mode !== data.mode || values.scope !== data.scope
+  const mode = draft ?? data.mode
+  const dirty = mode !== data.mode
   const error = state.error ?? savePolicy.error ?? confirmPolicy.error ?? addRule.error ?? toggleRule.error ?? removeRule.error
   const enforcing = data.mode === 'enforce'
   const auditing = data.mode === 'audit'
   const wouldBlock = blocks.data?.filter((item) => item.audit_only).reduce((total, item) => total + item.hit_count, 0) ?? 0
 
   const applyPolicy = () => {
-    if (values.mode === 'enforce' && data.mode !== 'enforce') { setConfirming(true); return }
-    savePolicy.mutate({ ...values, confirm_minutes: 0 })
+    if (mode === 'enforce' && data.mode !== 'enforce') { setConfirming(true); return }
+    savePolicy.mutate({ mode, confirm_minutes: 0 })
   }
 
   const banner = data.kill_switch
     ? { tone: 'border-amber-200 bg-amber-50 text-amber-900', text: 'A kill switch in the environment (IP_ALLOWLIST_DISABLED) is overriding every setting on this page. Nothing is being filtered.' }
     : enforcing
-      ? { tone: 'border-emerald-200 bg-emerald-50 text-emerald-900', text: `Enforcing. ${data.enabled_rule_count} allowed range${data.enabled_rule_count === 1 ? '' : 's'} · scope: ${data.scope === 'all' ? 'entire application' : 'sign-in only'}.` }
+      ? { tone: 'border-emerald-200 bg-emerald-50 text-emerald-900', text: `Enforcing. Only the ${data.enabled_rule_count} allowed range${data.enabled_rule_count === 1 ? '' : 's'} below can reach this application.` }
       : auditing
         ? { tone: 'border-amber-200 bg-amber-50 text-amber-900', text: `Audit only. Nothing is being refused${wouldBlock ? `; ${wouldBlock} request${wouldBlock === 1 ? '' : 's'} would have been` : ''}.` }
         : { tone: 'border-slate-200 bg-slate-50 text-slate-700', text: 'IP access control is off. Anyone on the internet can reach the sign-in page and attempt to authenticate.' }
@@ -851,25 +845,13 @@ function FirewallTab() {
     <section className="card space-y-4">
       <div>
         <p className="text-sm font-semibold text-slate-800">Mode</p>
+        <p className="text-xs text-slate-500">When this is on it applies to every request — the API and the web interface alike. Health checks are the only exception.</p>
         <div className="mt-2 grid gap-2 md:grid-cols-3">
-          {MODE_CARDS.map((card) => <label key={card.key} className={`cursor-pointer rounded-lg border p-3 transition ${values.mode === card.key ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}>
+          {MODE_CARDS.map((card) => <label key={card.key} className={`cursor-pointer rounded-lg border p-3 transition ${mode === card.key ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}>
             <span className="flex items-center gap-2">
-              <input type="radio" className="!w-auto" name="ip-mode" checked={values.mode === card.key} onChange={() => setDraft({ ...values, mode: card.key })} />
+              <input type="radio" className="!w-auto" name="ip-mode" checked={mode === card.key} onChange={() => setDraft(card.key)} />
               <span className="text-sm font-medium text-slate-800">{card.label}</span>
               {card.key === 'audit' && <Chip tone="info">recommended first</Chip>}
-            </span>
-            <span className="mt-1 block text-xs text-slate-600">{card.blurb}</span>
-          </label>)}
-        </div>
-      </div>
-
-      <div>
-        <p className="text-sm font-semibold text-slate-800">Scope</p>
-        <div className="mt-2 grid gap-2 md:grid-cols-2">
-          {SCOPE_CARDS.map((card) => <label key={card.key} className={`cursor-pointer rounded-lg border p-3 transition ${values.mode === 'disabled' ? 'opacity-50' : ''} ${values.scope === card.key ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}>
-            <span className="flex items-center gap-2">
-              <input type="radio" className="!w-auto" name="ip-scope" disabled={values.mode === 'disabled'} checked={values.scope === card.key} onChange={() => setDraft({ ...values, scope: card.key })} />
-              <span className="text-sm font-medium text-slate-800">{card.label}</span>
             </span>
             <span className="mt-1 block text-xs text-slate-600">{card.blurb}</span>
           </label>)}
@@ -953,10 +935,10 @@ function FirewallTab() {
       confirmDisabled={!data.your_ip_allowed || savePolicy.isPending}
       busy={savePolicy.isPending}
       onCancel={() => setConfirming(false)}
-      onConfirm={() => savePolicy.mutate({ ...values, confirm_minutes: 15 })}
+      onConfirm={() => savePolicy.mutate({ mode, confirm_minutes: 15 })}
     >
       {data.your_ip_allowed
-        ? <>Requests from addresses other than the {data.enabled_rule_count} allowed range{data.enabled_rule_count === 1 ? '' : 's'} will be refused. Your address <code className="font-mono">{data.your_ip}</code> is on the list.
+        ? <>Every request from an address other than the {data.enabled_rule_count} allowed range{data.enabled_rule_count === 1 ? '' : 's'} will be refused — the API and this web interface alike. Your address <code className="font-mono">{data.your_ip}</code> is on the list.
             <p className="mt-2">Enforcement reverts to audit automatically after 15 minutes unless you confirm on this page, so a mistake cannot lock you out.</p></>
         : <>Your address <code className="font-mono">{data.your_ip ?? 'unknown'}</code> is not on the list, so enforcing would lock you out immediately. Add it first.</>}
     </ConfirmDialog>

@@ -454,8 +454,12 @@ and `Permissions-Policy`.
 
 Throttling blunts brute force; not receiving the attempt at all removes it. **Access control → IP
 access** restricts which source addresses may reach the app, in three modes — `disabled`, `audit`
-(record what would be refused, refuse nothing) and `enforce` — across two scopes: `auth_only`, the
-credential surface only, or `all`, every request including the UI. Health probes are never filtered.
+(record what would be refused, refuse nothing) and `enforce`.
+
+It is deliberately all-or-nothing: when it is on, **every** request is filtered, the API and the web
+interface alike. Health probes are the only exemption, because a failing probe would restart the
+container forever. An earlier design let it cover only the sign-in endpoints; that read as a safety
+feature but was really a trap, because "the firewall is on" then meant two different things.
 
 Rules are IPv4/IPv6 addresses or CIDR ranges, stored normalized (a bare address becomes `/32` or
 `/128`), so a rule can never read differently from how it behaves. The compiled list lives in memory

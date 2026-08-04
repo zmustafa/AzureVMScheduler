@@ -4,6 +4,11 @@ Account lockout and the per-IP throttle blunt brute force but do not remove the 
 public ingress, anyone on the internet still gets to *try*. This filters by source address before
 any routing, session lookup or password verification happens.
 
+It is deliberately all-or-nothing: when it is on, every path is filtered except the health probes.
+An earlier design let it cover only the sign-in endpoints, which read as a safety feature but was
+really a trap — it invited "the firewall is on" to mean something different from what it meant, and
+the whole point of an admission control is that there is nothing to reason about.
+
 Three properties shape the implementation:
 
 * **It must be fast.** The check sits in front of every request including static assets, so it
@@ -34,18 +39,18 @@ from .netaddr import client_ip, matches, parse_address, parse_network
 logger = logging.getLogger(__name__)
 
 MODES = ("disabled", "audit", "enforce")
-SCOPES = ("auth_only", "all")
 
 #: Default commit-confirm window. Long enough to notice you are still connected, short enough that
 #: waiting it out is a reasonable recovery plan.
 DEFAULT_CONFIRM_MINUTES = 15
 
-#: Never filtered, whatever the scope. Container Apps probes the readiness endpoint from platform
-#: addresses nobody would think to allowlist, and a failing probe restarts the container forever.
+#: The only exemption. Container Apps probes the readiness endpoint from platform addresses nobody
+#: would think to allowlist, and a failing probe restarts the container forever.
 _EXEMPT_PATHS = frozenset({"/api/health", "/health", "/healthz", "/readyz"})
 
-#: The credential surface. `auth_only` scope filters exactly these — it is what brute force aims
-#: at, and restricting it leaves the rest of the app reachable, so a mistake is recoverable.
+#: The credential surface. Not used for filtering — everything is filtered — but it labels a blocked
+#: request in the log, so "someone is guessing passwords" reads differently from "someone loaded a
+#: page they should not have".
 _AUTH_PREFIXES = ("/api/auth/login", "/api/auth/change-password", "/api/auth/oidc/", "/api/auth/saml/")
 
 #: Blocked sources awaiting coalescing. Bounded: the buffer must never grow with attacker traffic.
@@ -63,7 +68,6 @@ class Snapshot:
     """The compiled policy the middleware reads. Immutable, replaced wholesale on refresh."""
 
     mode: str = "disabled"
-    scope: str = "auth_only"
     #: (rule id, network). Bootstrap networks carry a None id — they are not database rows.
     networks: tuple[tuple[str | None, object], ...] = ()
     confirm_by: datetime | None = None
@@ -131,7 +135,6 @@ async def refresh(db: AsyncSession) -> Snapshot:
 
     _snapshot = Snapshot(
         mode=(policy.ip_allowlist_mode if policy else "disabled") or "disabled",
-        scope=(policy.ip_allowlist_scope if policy else "auth_only") or "auth_only",
         networks=tuple(networks),
         confirm_by=_aware(policy.ip_allowlist_confirm_by) if policy else None,
     )
@@ -139,12 +142,8 @@ async def refresh(db: AsyncSession) -> Snapshot:
     return _snapshot
 
 
-def in_scope(path: str, scope: str) -> bool:
-    if path in _EXEMPT_PATHS:
-        return False
-    if scope == "all":
-        return True
-    return path.startswith(_AUTH_PREFIXES)
+def is_exempt(path: str) -> bool:
+    return path in _EXEMPT_PATHS
 
 
 def classify(path: str) -> str:
@@ -170,8 +169,8 @@ def evaluate(request) -> Decision:
     if not _loaded or not _snapshot.active:
         return Decision(allowed=True, reason="inactive")
     path = request.url.path
-    if not in_scope(path, _snapshot.scope):
-        return Decision(allowed=True, reason="out of scope")
+    if is_exempt(path):
+        return Decision(allowed=True, reason="exempt")
 
     address = parse_address(client_ip(request))
     for rule_id, network in _snapshot.networks:
@@ -314,6 +313,5 @@ def describe(snapshot_value: Snapshot | None = None) -> str:
     if not state.active:
         return "IP access control is off"
     count = len(state.networks)
-    scope = "sign-in only" if state.scope == "auth_only" else "the whole application"
     verb = "Enforcing" if state.mode == "enforce" else "Auditing"
-    return f"{verb} {count} allowed range{'' if count == 1 else 's'} across {scope}"
+    return f"{verb} {count} allowed range{'' if count == 1 else 's'}"

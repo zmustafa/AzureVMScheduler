@@ -33,7 +33,6 @@ COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
         "ip_lockout_seconds": "INTEGER NOT NULL DEFAULT 900",
         "allow_self_registration": "BOOLEAN NOT NULL DEFAULT 0",
         "ip_allowlist_mode": "VARCHAR(16) NOT NULL DEFAULT 'disabled'",
-        "ip_allowlist_scope": "VARCHAR(16) NOT NULL DEFAULT 'auth_only'",
         "ip_allowlist_confirm_by": "DATETIME",
     },
     "schedules": {

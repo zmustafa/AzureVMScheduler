@@ -157,7 +157,6 @@ class IpRulePatch(BaseModel):
 
 class IpPolicyUpdate(BaseModel):
     mode: Literal["disabled", "audit", "enforce"]
-    scope: Literal["auth_only", "all"] = "auth_only"
     #: Minutes before unconfirmed enforcement reverts to audit. 0 disables the safety timer, which
     #: is only sensible once you are certain the list is right.
     confirm_minutes: int = Field(default=15, ge=0, le=1440)

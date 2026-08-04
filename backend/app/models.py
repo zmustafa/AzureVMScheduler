@@ -82,12 +82,10 @@ class SecurityPolicy(Base):
     session_idle_minutes: Mapped[int] = mapped_column(Integer, default=60)
     session_absolute_hours: Mapped[int] = mapped_column(Integer, default=12)
     #: Network-level admission control. `disabled` filters nothing, `audit` records what would
-    #: have been refused without refusing it, `enforce` refuses. Off by default: turning it on
-    #: from a machine that is not on the list would lock the operator out.
+    #: have been refused without refusing it, `enforce` refuses. Deliberately all-or-nothing:
+    #: when it is on, every path is filtered except the health probes. Off by default, because
+    #: turning it on from a machine that is not on the list would lock the operator out.
     ip_allowlist_mode: Mapped[str] = mapped_column(String(16), default="disabled")
-    #: `auth_only` covers the credential surface (sign-in, password change, SSO start), which is
-    #: what brute force targets. `all` covers every request including the UI itself.
-    ip_allowlist_scope: Mapped[str] = mapped_column(String(16), default="auth_only")
     #: Commit-confirm, borrowed from network gear: enforcement reverts to `audit` at this instant
     #: unless someone confirms they can still reach the app. The recovery path that needs no
     #: Azure access at all.

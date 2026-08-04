@@ -65,8 +65,6 @@ export type AuthPolicies = {
 
 /** `audit` records what would be refused without refusing it; `enforce` refuses. */
 export type IpAllowlistMode = 'disabled' | 'audit' | 'enforce'
-/** `auth_only` covers the credential surface; `all` covers every request including the UI. */
-export type IpAllowlistScope = 'auth_only' | 'all'
 
 export type IpRule = {
   id: string
@@ -82,7 +80,6 @@ export type IpRule = {
 
 export type IpAccessState = {
   mode: IpAllowlistMode
-  scope: IpAllowlistScope
   /** When set, enforcement reverts to audit at this instant unless it is confirmed. */
   confirm_by: string | null
   your_ip: string | null

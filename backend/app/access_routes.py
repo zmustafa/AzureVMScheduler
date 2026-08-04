@@ -473,7 +473,6 @@ async def _ip_state(db: AsyncSession, request: Request) -> dict[str, Any]:
     bootstrap = firewall.bootstrap_networks()
     return {
         "mode": policy.ip_allowlist_mode,
-        "scope": policy.ip_allowlist_scope,
         "confirm_by": _utc(policy.ip_allowlist_confirm_by),
         "your_ip": caller,
         "your_ip_allowed": bool(matched) or firewall.allows(caller, bootstrap),
@@ -627,13 +626,12 @@ async def update_ip_policy(payload: IpPolicyUpdate, request: Request, actor: Use
         if not firewall.allows(caller, networks):
             raise HTTPException(status_code=409, detail=f"Your address ({caller or 'unknown'}) is not on the list, so enforcing would lock you out. Add it first.")
     policy.ip_allowlist_mode = payload.mode
-    policy.ip_allowlist_scope = payload.scope
     # The safety timer only means anything while enforcing; audit mode blocks nothing to recover from.
     policy.ip_allowlist_confirm_by = (
         utcnow() + timedelta(minutes=payload.confirm_minutes)
         if payload.mode == "enforce" and payload.confirm_minutes > 0 else None
     )
-    audit(db, actor, "ip_policy.updated", "security_policy", "1", {"mode": payload.mode, "scope": payload.scope, "confirm_minutes": payload.confirm_minutes, "actor_ip": caller})
+    audit(db, actor, "ip_policy.updated", "security_policy", "1", {"mode": payload.mode, "confirm_minutes": payload.confirm_minutes, "actor_ip": caller})
     await db.commit()
     await firewall.refresh(db)
     return await _ip_state(db, request)

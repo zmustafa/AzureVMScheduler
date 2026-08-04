@@ -110,9 +110,9 @@ def test_an_ipv4_address_is_never_inside_an_ipv6_range() -> None:
 # -- the decision --------------------------------------------------------
 
 
-def snapshot_with(mode: str, cidrs: list[str], scope: str = "auth_only") -> None:
+def snapshot_with(mode: str, cidrs: list[str]) -> None:
     firewall._snapshot = firewall.Snapshot(
-        mode=mode, scope=scope,
+        mode=mode,
         networks=tuple((f"rule-{index}", parse_network(cidr)) for index, cidr in enumerate(cidrs)),
     )
     firewall._loaded = True
@@ -180,36 +180,46 @@ def test_bootstrap_ranges_are_always_allowed() -> None:
         settings.ip_allowlist_bootstrap = before
 
 
-# -- scope ---------------------------------------------------------------
+# -- everywhere or nowhere ------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("path", "filtered"),
+    "path",
     [
-        ("/api/auth/login", True),
-        ("/api/auth/change-password", True),
-        ("/api/auth/oidc/abc/start", True),
-        ("/api/auth/saml/abc/acs", True),
-        ("/api/vms", False),
-        ("/", False),
+        "/api/auth/login",
+        "/api/auth/change-password",
+        "/api/auth/oidc/abc/start",
+        "/api/auth/saml/abc/acs",
+        "/api/vms",
+        "/settings/access",
+        "/",
     ],
 )
-def test_auth_only_scope_covers_the_credential_surface(path: str, filtered: bool) -> None:
-    snapshot_with("enforce", ["203.0.113.0/24"], scope="auth_only")
-    assert firewall.evaluate(request_for(path, peer="198.51.100.1")).allowed is not filtered
+def test_enforcement_covers_every_path(path: str) -> None:
+    """There is no partial coverage. "The firewall is on" has to mean one thing."""
+    snapshot_with("enforce", ["203.0.113.0/24"])
+    assert firewall.evaluate(request_for(path, peer="198.51.100.1")).allowed is False
 
 
-def test_the_whole_application_scope_covers_every_path() -> None:
-    snapshot_with("enforce", ["203.0.113.0/24"], scope="all")
-    assert firewall.evaluate(request_for("/api/vms", peer="198.51.100.1")).allowed is False
-    assert firewall.evaluate(request_for("/", peer="198.51.100.1")).allowed is False
+@pytest.mark.parametrize(
+    ("path", "label"),
+    [
+        ("/api/auth/login", "sign-in"),
+        ("/api/vms", "api"),
+        ("/settings/access", "ui"),
+    ],
+)
+def test_a_blocked_request_is_labelled_by_what_it_reached_for(path: str, label: str) -> None:
+    """Labels only describe the refusal; they never decide it. "Someone is guessing passwords"
+    should read differently from "someone loaded a page"."""
+    assert firewall.classify(path) == label
 
 
 @pytest.mark.parametrize("path", ["/api/health", "/health", "/healthz", "/readyz"])
-def test_health_probes_are_never_filtered(path: str) -> None:
+def test_health_probes_are_the_only_exemption(path: str) -> None:
     """Container Apps probes from platform addresses nobody would allowlist; a failing probe
     restarts the container forever, which would turn a typo into an outage loop."""
-    snapshot_with("enforce", ["203.0.113.0/24"], scope="all")
+    snapshot_with("enforce", ["203.0.113.0/24"])
     assert firewall.evaluate(request_for(path, peer="198.51.100.1")).allowed is True
 
 
@@ -309,7 +319,7 @@ async def test_enforcing_from_an_unlisted_address_is_refused(session) -> None:
     admin = await make_login(session, "ipadmin", roles["admin"])
     async with signed_in(session, admin) as client:
         await client.post("/api/access/ip-rules", json={"cidr": "203.0.113.0/24"})
-        response = await client.put("/api/access/ip-policy", json={"mode": "enforce", "scope": "auth_only"})
+        response = await client.put("/api/access/ip-policy", json={"mode": "enforce"})
         assert response.status_code == 409
         assert "lock you out" in response.json()["detail"]
 
@@ -318,7 +328,7 @@ async def test_enforcing_with_no_rules_at_all_is_refused(session) -> None:
     roles = await seeded(session)
     admin = await make_login(session, "ipadmin", roles["admin"])
     async with signed_in(session, admin) as client:
-        response = await client.put("/api/access/ip-policy", json={"mode": "enforce", "scope": "auth_only"})
+        response = await client.put("/api/access/ip-policy", json={"mode": "enforce"})
         assert response.status_code == 409
 
 
@@ -328,7 +338,7 @@ async def test_enforcing_from_a_listed_address_arms_the_safety_timer(session) ->
     async with signed_in(session, admin) as client:
         # The test transport calls from 127.0.0.1, which is this caller's real address.
         await client.post("/api/access/ip-rules", json={"cidr": "127.0.0.1", "label": "Me"})
-        response = await client.put("/api/access/ip-policy", json={"mode": "enforce", "scope": "auth_only", "confirm_minutes": 15})
+        response = await client.put("/api/access/ip-policy", json={"mode": "enforce", "confirm_minutes": 15})
         assert response.status_code == 200, response.text
         assert response.json()["confirm_by"] is not None
         assert response.json()["your_ip_allowed"] is True
@@ -346,7 +356,7 @@ async def test_deleting_the_rule_that_admits_you_is_refused_while_enforcing(sess
         # A second range means removing the first genuinely locks the caller out, rather than
         # emptying the list — which fails open and is handled separately below.
         await client.post("/api/access/ip-rules", json={"cidr": "203.0.113.0/24"})
-        await client.put("/api/access/ip-policy", json={"mode": "enforce", "scope": "auth_only"})
+        await client.put("/api/access/ip-policy", json={"mode": "enforce"})
 
         refused = await client.delete(f"/api/access/ip-rules/{rule_id}")
         assert refused.status_code == 409
@@ -363,7 +373,7 @@ async def test_emptying_the_list_turns_enforcement_off_rather_than_pretending(se
     admin = await make_login(session, "ipadmin", roles["admin"])
     async with signed_in(session, admin) as client:
         created = await client.post("/api/access/ip-rules", json={"cidr": "127.0.0.1", "label": "Me"})
-        await client.put("/api/access/ip-policy", json={"mode": "enforce", "scope": "auth_only"})
+        await client.put("/api/access/ip-policy", json={"mode": "enforce"})
 
         assert (await client.delete(f"/api/access/ip-rules/{created.json()['id']}")).status_code == 200
         state = (await client.get("/api/access/ip-rules")).json()
@@ -377,7 +387,7 @@ async def test_a_second_rule_may_be_removed_freely(session) -> None:
     async with signed_in(session, admin) as client:
         await client.post("/api/access/ip-rules", json={"cidr": "127.0.0.1"})
         spare = await client.post("/api/access/ip-rules", json={"cidr": "203.0.113.0/24"})
-        await client.put("/api/access/ip-policy", json={"mode": "enforce", "scope": "auth_only"})
+        await client.put("/api/access/ip-policy", json={"mode": "enforce"})
         assert (await client.delete(f"/api/access/ip-rules/{spare.json()['id']}")).status_code == 200
 
 
@@ -388,14 +398,14 @@ async def test_the_middleware_refuses_an_unlisted_caller_end_to_end(session) -> 
     async with signed_in(session, admin) as client:
         await client.post("/api/access/ip-rules", json={"cidr": "203.0.113.0/24", "label": "Somewhere else"})
         await client.post("/api/access/ip-rules", json={"cidr": "127.0.0.1", "label": "Me"})
-        await client.put("/api/access/ip-policy", json={"mode": "enforce", "scope": "all"})
+        await client.put("/api/access/ip-policy", json={"mode": "enforce"})
 
         # Still admitted: the caller is 127.0.0.1 and that is on the list.
         assert (await client.get("/api/access/ip-rules")).status_code == 200
 
         # Now take the caller off the list from underneath, as the auto-revert or another
         # administrator could, and confirm the door is genuinely shut.
-        snapshot_with("enforce", ["203.0.113.0/24"], scope="all")
+        snapshot_with("enforce", ["203.0.113.0/24"])
         blocked = await client.get("/api/access/ip-rules")
         assert blocked.status_code == 403
         assert blocked.json() == {"detail": "Forbidden"}
