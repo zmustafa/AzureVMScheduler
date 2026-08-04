@@ -17,6 +17,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import LoginThrottle, SecurityPolicy, utcnow
+from .netaddr import client_ip as _client_ip
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -27,19 +28,12 @@ def _aware(value: datetime | None) -> datetime | None:
 
 
 def client_ip(request) -> str | None:
-    """The caller's address, trusting a forwarded header only when configured to.
+    """The caller's address. Kept as an alias so existing call sites do not have to move.
 
-    Behind Azure Container Apps the peer is always the ingress, so ``X-Forwarded-For`` is the only
-    way to see the real client. Off a trusted proxy the header is attacker-controlled and must be
-    ignored, or an attacker rotates it to reset their own counter.
+    The derivation itself lives in `netaddr` because the IP allowlist has to agree with it
+    exactly: two different answers to "who is calling" is two different security decisions.
     """
-    from .config import get_settings
-
-    if get_settings().trust_forwarded_headers:
-        forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-        if forwarded:
-            return forwarded[:64]
-    return request.client.host[:64] if request and request.client else None
+    return _client_ip(request)
 
 
 async def check(db: AsyncSession, policy: SecurityPolicy, ip: str | None) -> int | None:

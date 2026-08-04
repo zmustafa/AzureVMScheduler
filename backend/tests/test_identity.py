@@ -308,14 +308,18 @@ def test_a_forwarded_header_is_ignored_unless_a_proxy_is_trusted() -> None:
         client = FakeClient()
 
     settings = get_settings()
-    original = settings.trust_forwarded_headers
+    original = (settings.trust_forwarded_headers, settings.forwarded_hops)
     try:
         settings.trust_forwarded_headers = False
         assert ip_lockout.client_ip(FakeRequest()) == "203.0.113.9"
-        settings.trust_forwarded_headers = True
-        assert ip_lockout.client_ip(FakeRequest()) == "1.2.3.4", "the left-most entry is the client"
+        settings.trust_forwarded_headers, settings.forwarded_hops = True, 1
+        # Each proxy APPENDS, so with one trusted hop the only entry that hop can vouch for is the
+        # last one. Reading the left-most entry instead would let a client send its own header and
+        # rotate its apparent address at will — resetting this counter and, worse, walking straight
+        # through the IP allowlist.
+        assert ip_lockout.client_ip(FakeRequest()) == "5.6.7.8", "the right-most entry is the one the proxy added"
     finally:
-        settings.trust_forwarded_headers = original
+        settings.trust_forwarded_headers, settings.forwarded_hops = original
 
 
 # -- password hashing ----------------------------------------------------

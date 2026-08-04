@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     #: Set true only when a trusted reverse proxy (Azure Container Apps ingress) terminates the
     #: connection. Off a trusted proxy X-Forwarded-For is attacker-controlled.
     trust_forwarded_headers: bool = False
+    #: How many proxies sit in front of this process. The client address is read that many entries
+    #: from the *right* of X-Forwarded-For, because each hop appends. Container Apps ingress is one
+    #: hop; add one for every additional proxy (Front Door, an nginx sidecar) or the allowlist can
+    #: be fooled by a client-supplied header.
+    forwarded_hops: int = Field(default=1, ge=1, le=10)
+    #: Break-glass for the IP allowlist: CIDRs that are always allowed, and a hard kill switch.
+    #: Deliberately environment-only — an administrator locked out of the UI can restore access
+    #: with a container restart, without database surgery.
+    ip_allowlist_bootstrap: str = ""
+    ip_allowlist_disabled: bool = False
     app_base_url: str = "http://127.0.0.1:5173"
     connector_http_timeout_seconds: float = Field(default=20.0, ge=1.0, le=120.0)
     smtp_timeout_seconds: float = Field(default=20.0, ge=1.0, le=120.0)
@@ -66,6 +76,10 @@ class Settings(BaseSettings):
     @property
     def return_origins(self) -> set[str]:
         return {item.strip().rstrip("/") for item in self.allowed_return_origins.split(",") if item.strip()}
+
+    @property
+    def bootstrap_networks(self) -> list[str]:
+        return [item.strip() for item in self.ip_allowlist_bootstrap.split(",") if item.strip()]
 
     @property
     def resolved_database_url(self) -> str:
