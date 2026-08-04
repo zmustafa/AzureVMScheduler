@@ -13,6 +13,12 @@ cryptography>=46.0.7,<49
 httpx>=0.27,<1
 PyJWT[crypto]>=2.9,<3
 azure-identity>=1.19,<2
+# The `azure.identity.aio` credentials acquire tokens through azure-core's async transport, which
+# is aiohttp. azure-identity does not depend on it, so without this line every real Azure call
+# fails at token acquisition with "aiohttp package is not installed" — Test, Discover, and every
+# start or stop against a live tenant. Floor is past the CVE-2024-52304/52303 request smuggling
+# and directory traversal fixes.
+aiohttp>=3.11.11,<4
 python-multipart>=0.0.17,<1
 # SAML assertion parsing and signature verification. Wheels only - no native xmlsec build.
 lxml>=5.3,<7
