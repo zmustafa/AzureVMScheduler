@@ -241,6 +241,11 @@ async def upsert_connection(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("A disabled connection cannot be the default")
         if auth_method == "az_cli_token" and payload.get("access_token_json"):
             merged["token_expires_at"] = _token_expiration(str(payload["access_token_json"]))
+        elif auth_method != "az_cli_token":
+            # Switching away from a pasted token must not leave its expiry behind: `merged` starts
+            # as a copy of the stored record, so a stale timestamp would otherwise outlive the
+            # method it described and keep reporting the tenant as expired.
+            merged.pop("token_expires_at", None)
         fernet = _fernet()
         for field in SECRET_FIELDS:
             if payload.get(field):

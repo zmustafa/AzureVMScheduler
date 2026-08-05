@@ -192,7 +192,10 @@ def _readiness(
                 "detail": "Turn on Allow VM stops for this tenant, or its stop waves will be refused.",
                 "link": "/settings/tenants",
             })
-        expires = connection.get("token_expires_at")
+        # `token_expires_at` only describes a pasted CLI token, which really does die after an
+        # hour. A service principal's secret has its own lifetime that Azure never tells us about,
+        # so applying this to every auth method reports a healthy tenant as expired forever.
+        expires = connection.get("token_expires_at") if connection.get("auth_method") == "az_cli_token" else None
         if expires:
             try:
                 expiry = datetime.fromisoformat(str(expires))

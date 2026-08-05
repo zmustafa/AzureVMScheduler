@@ -280,6 +280,7 @@ async def test_expired_and_expiring_tenant_credentials_raise_readiness_checks(se
         {
             "id": CONNECTION_ID,
             "display_name": "Zava Prod",
+            "auth_method": "az_cli_token",
             "allow_vm_start": True,
             "read_only": False,
             "disabled": False,
@@ -288,6 +289,7 @@ async def test_expired_and_expiring_tenant_credentials_raise_readiness_checks(se
         {
             "id": OTHER_CONNECTION_ID,
             "display_name": "Zava Test",
+            "auth_method": "az_cli_token",
             "allow_vm_start": True,
             "read_only": False,
             "disabled": False,
@@ -311,10 +313,35 @@ async def test_valid_tenant_credentials_raise_no_token_checks(session) -> None:
     connections = [{
         "id": CONNECTION_ID,
         "display_name": "Zava Prod",
+        "auth_method": "az_cli_token",
         "allow_vm_start": True,
         "read_only": False,
         "disabled": False,
         "token_expires_at": (NOW + timedelta(days=3)).isoformat(),
+    }]
+
+    result = await overview(session, connections=connections)
+
+    assert check_with_prefix(result, "token_expired:") is None
+    assert check_with_prefix(result, "token_expiring:") is None
+
+
+@pytest.mark.parametrize("auth_method", ["service_principal", "service_principal_cert", "azure_cli", "default_chain"])
+async def test_only_a_pasted_token_can_be_reported_as_expired(session, auth_method: str) -> None:
+    """`token_expires_at` describes a pasted CLI token and nothing else.
+
+    A connection that was once a pasted token and was later edited to a service principal keeps the
+    old timestamp in its record, so applying the check to every auth method reported a perfectly
+    healthy app registration as expired — permanently, and as a blocking error.
+    """
+    connections = [{
+        "id": CONNECTION_ID,
+        "display_name": "Zava App Registration",
+        "auth_method": auth_method,
+        "allow_vm_start": True,
+        "read_only": False,
+        "disabled": False,
+        "token_expires_at": (NOW - timedelta(days=30)).isoformat(),
     }]
 
     result = await overview(session, connections=connections)
