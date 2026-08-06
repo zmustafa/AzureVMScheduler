@@ -5,6 +5,7 @@ import type { LucideIcon } from 'lucide-react'
 import { useAuth, hasPermission } from '../auth'
 import { DisplayTimezoneSwitcher } from '../lib/time'
 import { useUnreadCount } from '../lib/notify'
+import { ForcePasswordChangePage } from '../pages/ForcePasswordChangePage'
 import { NotificationBell } from './NotificationBell'
 import { Loading } from './Ui'
 
@@ -87,9 +88,14 @@ export function ProtectedLayout() {
   const { user, loading, logout } = useAuth()
   const [open, setOpen] = useState(false)
   const canSeeNotifications = hasPermission(user, 'notifications.read')
-  const unread = useUnreadCount(!!user && canSeeNotifications)
+  // Hooks run before the guards below, so the poll is disabled for a principal the server will
+  // refuse anyway — otherwise the forced password-change screen sits behind a 403 poll loop.
+  const unread = useUnreadCount(!!user && !user.must_change_password && canSeeNotifications)
   if (loading) return <main className="mx-auto max-w-lg p-8"><Loading /></main>
   if (!user) return <Navigate to="/login" replace />
+  // The server refuses every path outside a small allowlist while this flag is set, so the shell
+  // and its pages would only render 403s. Show the one screen that can clear the flag instead.
+  if (user.must_change_password) return <ForcePasswordChangePage />
   // Hide a group entirely once every page inside it is out of reach, rather than leaving an empty menu.
   const allowed = nav
     .filter(item => visible(item, user.permissions))
@@ -108,7 +114,7 @@ export function ProtectedLayout() {
       <div className="absolute bottom-4 left-4 right-4 rounded-lg border border-slate-200 bg-white p-3 shadow-sm"><p className="truncate text-sm font-medium text-slate-900">{user.username}</p><p className="text-xs capitalize text-slate-500">{user.role}</p><button className="mt-3 text-xs font-medium text-blue-700 hover:text-blue-800" onClick={() => void logout()}>Sign out</button></div>
     </aside>
     {open && <button className="fixed inset-0 z-10 bg-black/60 lg:hidden" onClick={() => setOpen(false)} aria-label="Close navigation" />}
-    <main className="min-h-screen p-4 sm:p-6 lg:ml-64 lg:p-8"><div className="mx-auto max-w-7xl">{user.must_change_password && <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><span>The bootstrap administrator password must be changed.</span><NavLink className="font-semibold underline" to="/settings">Open password settings</NavLink></div>}<Outlet /></div></main>
+    <main className="min-h-screen p-4 sm:p-6 lg:ml-64 lg:p-8"><div className="mx-auto max-w-7xl"><Outlet /></div></main>
   </div>
 }
 /** Product title in the header. Sized to the sidebar column so it reads as the app's identity. */
