@@ -17,6 +17,11 @@ with two independent safety gates standing between you and a real Azure power ac
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
+<img src="docs/images/product-tour.gif" alt="Azure VM Scheduler product tour" width="900">
+
+<em>The whole application, end to end, running against the built-in demo estate with both safety gates
+off — note the mock-mode banners.</em>
+
 </div>
 
 ---
@@ -52,6 +57,7 @@ Azure VM Scheduler makes the *application* the unit of scheduling:
 ## Table of Contents
 
 - [✨ Features](#-features)
+- [🆕 What's new](#-whats-new)
 - [🚀 Deploy to Azure (one-click)](#-deploy-to-azure-one-click)
 - [⚡ Quick start (local)](#-quick-start-local)
 - [🧩 How it works](#-how-it-works)
@@ -83,16 +89,49 @@ Azure VM Scheduler makes the *application* the unit of scheduling:
 | **🔎 VM discovery & name resolution**<br>Paste bare VM names and let Azure Resource Graph work out subscription and resource group, browse a subscription, or paste full resource IDs. Ambiguous names are surfaced for you to choose; duplicates are blocked. | **📥 CSV import**<br>UTF-8 inventory CSV with a validating preview bound to an encrypted, expiring token — commit is atomic and rejects stale or tampered previews. The simplest valid file is a single column of VM names. |
 | **▶️ On-demand power actions**<br>`POST /api/vms/power-action` runs a schedule-less wave over hand-picked machines. Plus manual run, run-level retry of failed attempts, and single-attempt retry from the run detail page. | **🧾 Full run forensics**<br>Every wave is a run; every VM is an attempt with status, mode, message, attempt number, sequence and correlation id. Run status rolls up to succeeded / partially failed / failed / timed out / cancelled. |
 | **🔑 SSO: OIDC + SAML 2.0**<br>Any number of providers — Entra, any OIDC issuer via its discovery document, or SAML 2.0 verified with `signxml` (only the signed subtree is ever read). Authorization Code + PKCE, encrypted short-lived state, live JWKS validation. | **👥 Capability-based RBAC**<br>Users hold roles directly or through access groups; effective permissions are the union, resolved once per request. Built-in admin / operator / auditor / viewer / noaccess roles, re-seeded on every start, plus free-form custom roles. |
-| **🧱 Server-side walls**<br>A `noaccess` allowlist, a forced-password-change allowlist, and a per-IP brute-force throttle that catches one attacker spraying many usernames — all enforced on the API, not merely hidden in the UI. | **🔔 Connectors & notifications**<br>Teams, Slack, email (SMTP or Microsoft Graph), ServiceNow and signed generic webhooks. Severity / event / scope routing with quiet hours, throttles, and immediate, per-VM or daily-digest delivery on a bounded worker pool. |
+| **🧱 Server-side walls**<br>A `noaccess` allowlist, a forced-password-change allowlist, a per-IP brute-force throttle that catches one attacker spraying many usernames, and an IP access list that refuses unknown source addresses outright — all enforced on the API, not merely hidden in the UI. | **🔔 Connectors & notifications**<br>Teams, Slack, email (SMTP or Microsoft Graph), ServiceNow and signed generic webhooks. Severity / event / scope routing with quiet hours, throttles, and immediate, per-VM or daily-digest delivery on a bounded worker pool. |
 | **🧪 Demo estate in one click**<br>Settings → Demo data loads a sample Zava estate (4 applications, 9 rings, 18 VMs, 7 start/stop waves). Removal deletes exactly what the loader created — never a real application that happens to share a name. | **📦 One image, one deployment**<br>The built SPA is served by FastAPI at the same origin, so there is no CORS story and no second container. SQLite locally, PostgreSQL in Azure — chosen purely by `DATABASE_URL`. |
 
 ### Enterprise-ready
 
 🔒 Both real-action gates ship **off** · 🔐 Fernet-encrypted credential registries · 🧾 full audit log ·
 👥 RBAC with users / roles / access groups · 🔑 OIDC + SAML SSO · 🚫 lock-out guards that return `409` ·
-🛡️ CSRF + same-origin enforcement + security headers on every response · 🌐 optional fully private
-networking (Private Endpoints for database and storage) · 🏢 multi-tenant Azure connections ·
-🆔 managed-identity support with no stored secret at all.
+🌐 IP allowlist admission control · 🛡️ CSRF + same-origin enforcement + security headers on every
+response · 🕸️ optional fully private networking (Private Endpoints for database and storage) ·
+🏢 multi-tenant Azure connections · 🆔 managed-identity support with no stored secret at all.
+
+---
+
+## 🆕 What's new
+
+### 🌐 IP access control — allowlist who can reach the app
+
+Account lockout and the per-IP throttle blunt a brute-force attempt, but they do not remove the
+exposure: with public ingress, anyone on the internet still gets to try. **Access control → IP
+access** now refuses requests by source address *before* routing, session lookup or password
+verification.
+
+- **Three modes** — `disabled`, `audit` (record what would be refused, refuse nothing) and
+  `enforce`. Audit lets you prove your rules are right before they can bite.
+- **All-or-nothing on purpose** — when it is on, every request is filtered, API and web interface
+  alike. Health probes are the only exemption, so "the firewall is on" means exactly one thing.
+- **Normalized rules** — IPv4/IPv6 addresses or CIDR ranges, stored canonically (a bare address
+  becomes `/32` or `/128`), so a rule can never read differently from how it behaves.
+- **No amplification** — the compiled list lives in memory and is recompiled after every write, so a
+  blocked request performs no database work at all. Refusals accumulate in a bounded buffer that the
+  scheduler drains into coalesced `ip_block_events` rows.
+- **Fails open, never closed, with four lock-out defences** — a `409` guard when the change would
+  block your own address, auto-revert to `disabled` when the last rule is removed, a 15-minute
+  commit-confirm timer on enabling enforcement, and the environment-only `IP_ALLOWLIST_BOOTSTRAP` /
+  `IP_ALLOWLIST_DISABLED` break-glass pair that a container restart always honours.
+- **Correct behind a proxy** — the client address is read `FORWARDED_HOPS` entries from the **right**
+  of `X-Forwarded-For`, because each hop appends; reading the leftmost entry would let any client
+  forge its own address and walk straight through the allowlist.
+- **Defence in depth** — `deploy/main.bicep` also accepts an optional `allowedClientIps` array that
+  filters at the Container Apps ingress, before traffic ever reaches the container.
+
+It ships with an Overview readiness check, audit events and its own tab in the UI.
+👉 Full details in [IP access control](#ip-access-control).
 
 ---
 
@@ -111,6 +150,11 @@ What it creates:
 3. **Azure Files** share mounted at `/app/.data` for the encryption key and the connection registry
 4. **Container Apps environment** + Log Analytics workspace
 5. A **system-assigned managed identity** on the Container App
+
+![Deployment shape](docs/images/n3-deployment-shape.png)
+
+*Everything one deployment creates. The private-networking switch is create-time only — an existing
+public deployment has to be redeployed, not flipped.*
 
 You supply only an admin password, and you are forced to change it on first sign-in.
 
@@ -245,6 +289,11 @@ vm_attempts    -> one row per VM inside a run
 | `roles`, `access_groups`, `user_roles`, `user_access_groups`, `identity_providers` | Access control: capability sets, role bundles, their assignments, and SSO directories |
 | `ip_allow_rules`, `ip_block_events` | IP access control: allowed source ranges, and coalesced refusals |
 
+![Ring board](docs/images/ring-board.gif)
+
+*The ring board for one application. The sequence number on each ring is the whole ordering model —
+there is nothing else to configure.*
+
 ### Resolution rules
 
 **Which schedule acts on a VM** (`hierarchy.effective_schedule`), resolved **independently per
@@ -259,6 +308,11 @@ action** so a VM can have both a start wave and a stop wave:
 When a group schedule builds its wave it selects the VMs in its subtree that are enabled, whose whole
 ancestor chain is enabled, and whose effective schedule for that action is that same schedule. VMs
 shadowed by a nearer schedule are excluded.
+
+![A wave running](docs/images/run-wave.gif)
+
+*A wave running. Each row appears as its machine's turn comes up, in ring order, one stagger interval
+apart.*
 
 **Which Azure connection is used** (`hierarchy.effective_connection_id`):
 
@@ -284,6 +338,11 @@ causes an outage.
 - **On-demand.** `POST /api/vms/power-action` runs a schedule-less wave over hand-picked machines. A
   stop refuses outright if any selected machine is protected, and requires the exact machine count
   echoed back in `confirm_count`.
+
+![Ring order, start versus stop](docs/images/n1-ring-order.png)
+
+*One application, two waves. Read the stop row right to left and you have the start row — that is the
+point.*
 
 ---
 
@@ -318,6 +377,16 @@ causes an outage.
 - Manual run, run-level retry of failed attempts, and single-attempt retry are available from the run
   and schedule detail pages.
 
+![Schedule builder with live preview](docs/images/schedule-builder.gif)
+
+*Watch the right-hand panel as the cron expression is typed. That description and those five dates
+come back from the server on every keystroke — from the same engine that fires the schedule.*
+
+![Run detail with per-VM attempts](docs/images/s1-run-detail-attempts.png)
+
+*One wave, after the fact: the mode it ran in, the correlation id, the roll-up, and every machine it
+touched.*
+
 ### Scheduler tuning
 
 | Variable | Default | Meaning |
@@ -349,6 +418,11 @@ Starts and stops are gated **separately**, and each requires **both** of its gat
 | ▶️ Start | `ENABLE_REAL_AZURE_STARTS=true` | `allow_vm_start = true` |
 | ⏹️ Stop | `ENABLE_REAL_AZURE_STOPS=true` | `allow_vm_stop = true` |
 
+![Settings action gates](docs/images/s5-settings-action-gates.png)
+
+*The gates are a visible posture, not a buried environment variable. This is what a fresh deployment
+looks like, and what it keeps looking like until somebody changes it.*
+
 The pairs are deliberately independent: turning on real starts grants no permission to stop anything.
 If either gate for an action is off, the deterministic **mock adapter** runs and the attempt is
 recorded with `mode = mock`. Connections flagged `read_only` can never start or stop VMs. When a
@@ -364,6 +438,11 @@ a record written before a gate existed can never be treated as granting it.
 Stops carry two further protections that starts do not: the `never_stop` flag (on a VM or any ancestor
 group) removes a machine from every stop wave, and an on-demand stop must echo back the exact number of
 machines it will act on.
+
+![Stop confirmation dialog](docs/images/stop-safety.gif)
+
+*Eighteen machines selected, but the dialog offers to stop sixteen — two are `never_stop` and it says
+so. The confirm button stays dead until `16` is typed.*
 
 ---
 
@@ -384,6 +463,11 @@ Each tenant carries `allow_vm_start`, `allow_vm_stop`, `read_only`, `disabled`, 
 last-known `status`. **Test** validates credentials and **Discover** lists reachable subscriptions.
 Azure is contacted only when one of those actions is clicked, when VMs are added from Azure, or when a
 real-mode start or stop runs.
+
+![Azure tenant registry](docs/images/s6-azure-tenants.png)
+
+*Two tenants, one writable and one read-only, both authenticating as the host identity. The per-tenant
+permissions are the second half of every gate.*
 
 ### Adding virtual machines
 
@@ -488,6 +572,11 @@ filters at the Container Apps ingress, before traffic reaches the container.
 Everything lives on one page, **Access control** (`/access`), gated on the `users.manage` capability,
 with seven tabs: Users, Roles, Access groups, Sessions, Policies, IP access, and Sign-in & SSO.
 
+![Access control](docs/images/access-control.gif)
+
+*Users, roles, access groups, live sessions, sign-in policy and the SSO providers — one page, one
+permission to reach it.*
+
 Authorization is capability-based. A user holds any number of **roles**, directly or through an
 **access group**; their effective permissions are the union of all of them, resolved once per request.
 Capabilities are declared in one place, `backend/app/permissions.py`, grouped into Overview, Estate,
@@ -536,6 +625,16 @@ after 5 failures for 15 minutes; 60-minute idle and 12-hour absolute session lim
 | Access control | `/access` | Users, roles, access groups, sessions, security policy, IP access list, sign-in & SSO |
 | Audit log | `/audit` | Filterable audit history |
 
+![Coverage gaps on the overview](docs/images/n2-coverage-gaps.png)
+
+*The Overview finds partial coverage in both directions. The middle one — machines that stop tonight
+and are never started again — is the one that ruins a Monday.*
+
+![Locate and place VMs](docs/images/s4-locate-and-place-vms.png)
+
+*Four names in. Three are already filed and it tells you exactly which ring holds each; the fourth is
+unknown and gets offered a tenant to resolve against.*
+
 Navigation entries are hidden when the signed-in user lacks the matching permission.
 
 The header carries a global **display timezone switch** — `schedule` (each row in its own schedule's
@@ -549,6 +648,11 @@ The UI is **light mode only** — there is no dark theme and none should be adde
 
 UTF-8 CSV up to 2 MB. Preview validates every row and returns an encrypted, expiring token bound to the
 exact normalized rows; commit rejects stale or tampered previews and is atomic.
+
+![CSV import preview and commit](docs/images/csv-import.gif)
+
+*Nothing is written during a preview. The commit is all-or-nothing, and a preview that has gone stale
+is refused rather than partly applied.*
 
 The format is detected from the headers: a file containing a `schedule_type` column is treated as the
 legacy schedule format, everything else as inventory. Every row identifies its VM by **either**
