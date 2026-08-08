@@ -59,6 +59,7 @@ Azure VM Scheduler makes the *application* the unit of scheduling:
 - [✨ Features](#-features)
 - [🆕 What's new](#-whats-new)
 - [🚀 Deploy to Azure (one-click)](#-deploy-to-azure-one-click)
+  - [🕸️ Private networking deployment](#️-private-networking-deployment)
 - [⚡ Quick start (local)](#-quick-start-local)
 - [🧩 How it works](#-how-it-works)
 - [⏰ Scheduling](#-scheduling)
@@ -163,17 +164,113 @@ You supply only an admin password, and you are forced to change it on first sign
 > runs against the mock adapter until you deliberately turn a gate on. Each gate is still ANDed with
 > the per-tenant permission, so flipping one is necessary but not sufficient.
 
-**🔐 Private networking.** Setting `privateNetworking` to `Yes` injects the Container Apps
-environment into a VNet and puts both PostgreSQL and the storage account behind Private Endpoints,
-with public access disabled on both. This is a **create-time choice** — an existing public deployment
-cannot be flipped in place; it has to be redeployed.
-
 **🆔 Connecting Azure without storing a secret.** Grant the Container App's managed identity Reader on
 the scope you want to manage, plus `start` / `deallocate` / `powerOff` on the target VMs, then add a
 tenant in the app using the `default_chain` auth method. No client secret is stored at all.
 
 > `deploy/main.json` is generated from `deploy/main.bicep` and is what the button reads — regenerate
 > it with `az bicep build`, never hand-edit it.
+
+### 🕸️ Private networking deployment
+
+The same template also deploys the whole thing in a **fully private data-plane shape**. Set the
+**Private networking** parameter to `Yes` (`privateNetworking=Yes`) — on the Deploy to Azure form or
+on the CLI — and the deployment additionally provisions a VNet, injects the Container Apps
+environment into it, and puts **both** PostgreSQL and the Azure Files storage account behind Private
+Endpoints, with public network access **disabled** on each.
+
+Nothing else about the application changes: same image, same `DATABASE_URL`, same `/app/.data`
+mount. Only how the traffic reaches them changes.
+
+```mermaid
+flowchart LR
+  user([Operator]) -->|HTTPS| ingress["Container Apps ingress<br/>optional allowedClientIps filter"]
+
+  subgraph vnet["VNet — vnetAddressSpace, default 10.44.0.0/22"]
+    subgraph infra["snet-infra /23 — delegated to Microsoft.App/environments"]
+      app["Container App<br/>Azure VM Scheduler<br/>system-assigned identity"]
+    end
+    subgraph pesub["snet-pe — private endpoint NICs"]
+      pepg["Private Endpoint<br/>postgresqlServer"]
+      pefile["Private Endpoint<br/>file"]
+    end
+  end
+
+  ingress --> app
+  app -->|privatelink.postgres.database.azure.com| pepg
+  app -->|privatelink.file.core.windows.net| pefile
+  pepg --> pg[("PostgreSQL Flexible Server<br/>public access disabled")]
+  pefile --> sa[("Storage account / Azure Files<br/>public access disabled")]
+  app -->|managed identity over ARM| arm["Azure Resource Manager<br/>start / deallocate / powerOff"]
+```
+
+**What `privateNetworking = Yes` changes**
+
+| Resource | Behaviour |
+| --- | --- |
+| **Virtual network** | Created with `vnetAddressSpace` and two subnets: `snet-infra`, delegated to `Microsoft.App/environments` and required to be **at least a `/23`**, and `snet-pe`, with private endpoint network policies disabled. |
+| **Container Apps environment** | VNet-injected into `snet-infra`, so every outbound call the app makes originates inside the VNet. |
+| **PostgreSQL Flexible Server** | `publicNetworkAccess: Disabled` — reachable only through its Private Endpoint. The `AllowAzureServices` firewall rule is **not** created, because firewall rules are a public-access construct. |
+| **Storage account (Azure Files)** | `publicNetworkAccess: Disabled` and `networkAcls.defaultAction: Deny`, reached over a `file` Private Endpoint. Shared-key access stays enabled because the Container Apps Azure Files CSI driver authenticates with the account key. |
+| **Private DNS** | `privatelink.postgres.database.azure.com` and `privatelink.file.<storage suffix>` zones are created, linked to the VNet and wired to each endpoint by a private DNS zone group — so the app keeps using the normal FQDNs and simply resolves them to private IPs. |
+
+**Parameters**
+
+| Parameter | Default | Notes |
+| --- | --- | --- |
+| `privateNetworking` | `No` | `Yes` turns the entire private shape on. **Create-time only.** |
+| `vnetAddressSpace` | `10.44.0.0/22` | Pick a range that does not overlap networks you may later peer with. |
+| `infraSubnetPrefix` | `10.44.0.0/23` | Container Apps requires a `/23` or larger. |
+| `privateEndpointSubnetPrefix` | `10.44.2.0/27` | Must sit inside the address space and not overlap the infrastructure subnet. |
+| `allowedClientIps` | `[]` | Optional CIDR filter applied at the ingress — see below. |
+| `ipAllowlistBootstrap` | `''` | Break-glass CIDRs the app always admits, whatever its own IP access list says. |
+
+**Deploying it from the CLI**
+
+```powershell
+az group create -n rg-vmscheduler -l westus3
+
+az deployment group create `
+  -g rg-vmscheduler `
+  -f deploy/main.bicep `
+  -p appName=azure-vm-scheduler `
+     adminPassword='<bootstrap-admin-password>' `
+     privateNetworking=Yes `
+     vnetAddressSpace=10.44.0.0/22 `
+     infraSubnetPrefix=10.44.0.0/23 `
+     privateEndpointSubnetPrefix=10.44.2.0/27
+```
+
+Add `allowedClientIps="['203.0.113.0/24']"` to filter the ingress in the same deployment.
+
+> #### ⚠️ Create-time only
+> A Container Apps environment's VNet configuration and a Flexible Server's public-access setting are
+> both fixed when the resource is created, so an existing `No` deployment **cannot be flipped to
+> `Yes`** in place. It has to be redeployed, moving the estate across with **Settings → Backup &
+> restore**: export from the old deployment, import into the new one.
+
+**What private networking does *not* do.** It privatises the *data plane* — database and file
+storage. The application's own ingress stays external HTTPS, because that is how you reach the web
+interface. Restrict who can reach it with the two complementary layers:
+
+1. `allowedClientIps` — source CIDRs allowed at the Container Apps ingress, applied before a request
+   ever reaches the container and unspoofable by a forwarded header. Recovery from a mistake here
+   needs the Azure control plane:
+   `az containerapp ingress access-restriction remove -n <app> -g <rg> --rule-name <name>`.
+2. **Access control → IP access** — the fine-grained, UI-editable allowlist inside the app, with an
+   audit mode, a commit-confirm timer and break-glass environment variables. See
+   [IP access control](#ip-access-control).
+
+**Notes and limits**
+
+- The PostgreSQL private DNS zone name is fixed to the Azure **public** cloud
+  (`privatelink.postgres.database.azure.com`); sovereign clouds use a different zone name and need
+  the template adjusting.
+- `snet-infra` still needs outbound access to pull the container image and to call Azure Resource
+  Manager. If you later attach a firewall or route table to that subnet, allow the Container Apps
+  and ARM dependencies, or the app cannot power anything.
+- Replicas stay pinned at 1/1 in both shapes — the scheduler runs in-process and is single-writer by
+  design.
 
 ---
 
