@@ -11,7 +11,7 @@ import { StatusBadge } from '../components/StatusBadge'
 import { SortHeader } from '../components/SortHeader'
 import { TimeRangePicker } from '../components/TimeRangePicker'
 import { ActivityTimeline, clampSelection, type Selection } from '../components/ActivityTimeline'
-import { RunProgress, countsText, latenessText, runDurationText } from '../components/RunProgress'
+import { RunProgress, countsText, isRunActive, latenessText, runDurationText } from '../components/RunProgress'
 import { Chip, EmptyState, ErrorNotice, Pagination, PageHeader, SearchInput, TableSkeleton } from '../components/Ui'
 import type { ActivityResponse, Paged, ScheduleRun } from '../types'
 
@@ -94,7 +94,7 @@ export function RunsPage() {
     return `/runs?${search.toString()}&${sortParams}`
   }, [status, trigger, offset, window.from, window.to, sortParams])
 
-  const list = useQuery({ queryKey: ['runs', path], queryFn: () => api<Paged<ScheduleRun>>(path), refetchInterval: 20_000, placeholderData: (previous) => previous })
+  const list = useQuery({ queryKey: ['runs', path], queryFn: () => api<Paged<ScheduleRun>>(path), refetchInterval: (query) => ((query.state.data?.items ?? []).some(isRunActive) ? 15_000 : 60_000), placeholderData: (previous) => previous })
 
   const activityPath = useMemo(() => {
     const search = new URLSearchParams({ limit: '500' })

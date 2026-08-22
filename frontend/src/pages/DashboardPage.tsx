@@ -17,7 +17,11 @@ import { RunProgress, countsText, isRunActive, isRunFailed, latenessText, runDur
 import { Chip, ErrorNotice, PageHeader, Skeleton, TableSkeleton } from '../components/Ui'
 import type { ActivityResponse, Overview, Paged, ScheduleRun, TimelineBlock, UpcomingSchedule } from '../types'
 
-const POLL_MS = 15_000
+// A wave in flight is the only time this page changes quickly. Polling five endpoints every 15
+// seconds around the clock cost the server roughly 1,200 requests an hour per open tab, and
+// /api/overview recomputes the whole estate on each one.
+const ACTIVE_POLL_MS = 15_000
+const IDLE_POLL_MS = 60_000
 const PIN_KEY = 'azureops.pinned-applications'
 
 type Kpi = {
@@ -337,7 +341,13 @@ export function DashboardPage() {
   useTick(30_000)
   const anchor = Math.floor(serverNow() / 30_000) * 30_000
   const window = useMemo(() => resolveRange(range, anchor), [range, anchor])
-  const poll = paused ? false : POLL_MS
+  const runs = useQuery({
+    queryKey: ['runs', 'dashboard'],
+    queryFn: () => api<Paged<ScheduleRun>>('/runs?limit=50'),
+    refetchInterval: paused ? false : (query) => ((query.state.data?.items ?? []).some(isRunActive) ? ACTIVE_POLL_MS : IDLE_POLL_MS),
+  })
+  const busy = (runs.data?.items ?? []).some(isRunActive)
+  const poll = paused ? false : busy ? ACTIVE_POLL_MS : IDLE_POLL_MS
 
   const overviewPath = useMemo(
     () => `/overview?from=${encodeURIComponent(new Date(window.from).toISOString())}&to=${encodeURIComponent(new Date(window.to).toISOString())}`,
@@ -345,7 +355,6 @@ export function DashboardPage() {
   )
   const overview = useQuery({ queryKey: ['overview', overviewPath], queryFn: () => api<Overview>(overviewPath), refetchInterval: poll, placeholderData: (previous) => previous })
   const upcoming = useQuery({ queryKey: ['schedules', 'upcoming', 8], queryFn: () => api<UpcomingSchedule[]>('/schedules/upcoming?limit=8'), refetchInterval: poll })
-  const runs = useQuery({ queryKey: ['runs', 'dashboard'], queryFn: () => api<Paged<ScheduleRun>>('/runs?limit=50'), refetchInterval: poll })
   const timeline = useQuery({
     queryKey: ['timeline', 'dashboard', anchor],
     queryFn: () => api<TimelineBlock[]>(`/timeline?from=${new Date(anchor).toISOString()}&to=${new Date(anchor + 24 * 3_600_000).toISOString()}`),
@@ -496,7 +505,7 @@ export function DashboardPage() {
     </>}
 
     {data && <p className="mt-4 text-center text-xs text-slate-500">
-      Updated {format(data.generated_at)}{paused ? ' · auto-refresh paused' : ` · refreshing every ${POLL_MS / 1000}s`}
+      Updated {format(data.generated_at)}{paused ? ' · auto-refresh paused' : ` · refreshing every ${(busy ? ACTIVE_POLL_MS : IDLE_POLL_MS) / 1000}s`}
     </p>}
   </>
 }
