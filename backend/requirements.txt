@@ -7,9 +7,12 @@ alembic>=1.14,<2
 pydantic-settings>=2.6,<3
 tzdata>=2024.2
 argon2-cffi>=23.1,<26
-# Floor is the first release past PYSEC-2026-35/36/2141 and GHSA-537c-gmf6-5ccf. The previous
-# `<46` ceiling actively held the package on a vulnerable line.
-cryptography>=46.0.7,<49
+# Floor is the first release past PYSEC-2026-3552/3553/3554 (a PKCS#7 decryption oracle, an
+# exponential blowup resolving X.509 chains, and a name-constraint wildcard escape). This is the
+# second time an upper bound here has held the package on a vulnerable line -- `<46` did it before
+# and `<49` did it again -- so the ceiling exists only to match msal's `cryptography<51` and must
+# be raised to follow a fix, never left to block one.
+cryptography>=50,<51
 httpx>=0.27,<1
 PyJWT[crypto]>=2.9,<3
 azure-identity>=1.19,<2
