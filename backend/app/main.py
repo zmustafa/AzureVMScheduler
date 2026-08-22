@@ -78,7 +78,7 @@ from .hierarchy import (
     resolve_schedule_vms,
     resolve_schedule_vms_bulk,
 )
-from .models import AuditLog, Group, IdentityProvider, ImportBatch, LoginSession, NotificationDelivery, NotificationEvent, NotificationRule, Schedule, ScheduleRun, SecurityPolicy, User, VirtualMachine, VmAttempt, new_id, utcnow
+from .models import AuditLog, Group, IdentityProvider, ImportBatch, LoginSession, NotificationDelivery, NotificationEvent, NotificationRule, Schedule, ScheduleRun, SecurityPolicy, User, VirtualMachine, VmAttempt, aware as _aware, new_id, utcnow
 from .notifications import EVENT_TYPES, publish, unread_count
 from .overview import build_overview
 from . import firewall, ip_lockout, oidc, saml
@@ -317,10 +317,6 @@ async def load_vm(db: AsyncSession, vm_id: str) -> VirtualMachine:
     if not vm:
         raise HTTPException(status_code=404, detail="Virtual machine not found")
     return vm
-
-
-def _aware(value: datetime | None) -> datetime | None:
-    return value.replace(tzinfo=value.tzinfo or timezone.utc) if value else None
 
 
 def _safe_error(exc: Exception) -> str:

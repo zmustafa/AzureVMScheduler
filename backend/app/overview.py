@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .hierarchy import GroupTree, ScheduleIndex, effective_schedule, is_stop_protected, load_schedule_index, load_tree
+from . import firewall
 from .models import (
     Group,
     NotificationDelivery,
@@ -23,18 +24,15 @@ from .models import (
     SecurityPolicy,
     VirtualMachine,
     VmAttempt,
+    aware as _aware,
+    utcnow,
 )
-from .scheduling import utcnow
 
 FAILED_RUN_STATUSES = ("failed", "partially_failed", "timed_out")
 FAILED_ATTEMPT_STATUSES = ("failed", "timed_out")
 TREND_BUCKETS = 14
 # A run still unfinished long after the monitor could have given up is almost certainly orphaned.
 STUCK_RUN_MULTIPLIER = 2
-
-
-def _aware(value: datetime | None) -> datetime | None:
-    return value.replace(tzinfo=value.tzinfo or timezone.utc) if value else None
 
 
 def _percentile(values: list[float], fraction: float) -> float | None:
@@ -266,8 +264,6 @@ def _readiness(
 
     # Public ingress with nothing filtering it means every password-guessing bot on the internet
     # gets to try. Surfaced here because this is the page an operator actually looks at.
-    from . import firewall
-
     if not firewall.snapshot().active:
         checks.append({
             "id": "no_ip_allowlist",

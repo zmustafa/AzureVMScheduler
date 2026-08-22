@@ -13,6 +13,15 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def aware(value: datetime | None) -> datetime | None:
+    """Attach UTC to a naive timestamp.
+
+    SQLite hands back naive datetimes even for timezone-aware columns, so anything comparing or
+    serializing a stored timestamp has to do this first.
+    """
+    return value.replace(tzinfo=value.tzinfo or timezone.utc) if value else None
+
+
 def new_id() -> str:
     return str(uuid4())
 

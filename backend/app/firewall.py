@@ -33,7 +33,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
-from .models import IpAllowRule, IpBlockEvent, SecurityPolicy, new_id, utcnow
+from .models import IpAllowRule, IpBlockEvent, SecurityPolicy, aware as _aware, new_id, utcnow
 from .netaddr import client_ip, matches, parse_address, parse_network
 
 logger = logging.getLogger(__name__)
@@ -299,13 +299,6 @@ async def _flush_rule_hits(db: AsyncSession) -> int:
         row.last_seen_at = now
     await db.commit()
     return len(rows)
-
-
-def _aware(value: datetime | None) -> datetime | None:
-    """SQLite hands back naive datetimes; treat them as UTC so comparisons never raise."""
-    if value is None:
-        return None
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def describe(snapshot_value: Snapshot | None = None) -> str:

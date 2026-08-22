@@ -23,7 +23,7 @@ from .models import AccessGroup, Group, NotificationRule, Role, Schedule, Schedu
 from .permissions import unknown_permissions
 from .recurrence import Recurrence, one_time_at
 from .recurrence import next_occurrence as recurrence_next
-from .scheduling import resolve_default_timezone
+from .validation import resolve_default_timezone
 from .validation import normalize_resource_id, parse_vm_resource_id
 
 

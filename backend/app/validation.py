@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from .config import get_settings
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, keeps this module a leaf at runtime
+    from .models import SecurityPolicy
 
 
 VM_RESOURCE_ID = re.compile(
@@ -51,3 +57,17 @@ def validate_timezone(value: str) -> str:
     except (ZoneInfoNotFoundError, ValueError, KeyError) as exc:
         raise ValueError(f"Unknown timezone: {name}") from exc
     return name
+
+
+def resolve_default_timezone(policy: SecurityPolicy | None = None) -> str:
+    """The configured default zone, falling back through policy, environment, then UTC.
+
+    Lives here rather than in the scheduler so that reading a timezone does not require importing
+    the scheduler, which drags in the Azure adapters and the firewall behind it.
+    """
+    for candidate in ((policy.default_timezone if policy else None), get_settings().default_timezone):
+        try:
+            return validate_timezone(candidate or "")
+        except ValueError:
+            continue
+    return "UTC"

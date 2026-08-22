@@ -22,7 +22,7 @@ from .notifications import publish, run_daily_digests
 from .recurrence import Recurrence, localize as localize_wall_clock
 from .recurrence import next_occurrence as recurrence_next
 from .templating import run_url
-from .validation import parse_vm_resource_id, validate_timezone
+from .validation import parse_vm_resource_id, resolve_default_timezone, validate_timezone
 
 
 logger = logging.getLogger(__name__)
@@ -38,15 +38,6 @@ ATTEMPT_EVENTS = {
     "start": {"failed": ("vm.start_failed", "error"), "timed_out": ("vm.start_timed_out", "error"), "skipped": ("vm.start_skipped", "warning")},
     "stop": {"failed": ("vm.stop_failed", "warning"), "timed_out": ("vm.stop_timed_out", "warning"), "skipped": ("vm.stop_skipped", "warning")},
 }
-
-
-def resolve_default_timezone(policy: SecurityPolicy | None = None) -> str:
-    for candidate in ((policy.default_timezone if policy else None), get_settings().default_timezone):
-        try:
-            return validate_timezone(candidate or "")
-        except ValueError:
-            continue
-    return "UTC"
 
 
 def _localize(value: datetime, zone: ZoneInfo) -> datetime:
