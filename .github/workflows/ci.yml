@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (${{ matrix.database }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The engine is chosen by DATABASE_URL at runtime: SQLite locally, PostgreSQL in Azure.
+        # Both have to pass, because schema_ops takes a different path on each.
+        database: [sqlite, postgresql]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: azureops_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements-dev.txt
+
+      - name: Run the test suite
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: >-
+            ${{ matrix.database == 'postgresql'
+                && 'postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/azureops_test'
+                || 'sqlite+aiosqlite:///:memory:' }}
+        run: python -m pytest tests -q
+
+      - name: Migrations must have a single head
+        if: matrix.database == 'sqlite'
+        working-directory: backend
+        run: |
+          heads=$(python -m alembic heads | wc -l)
+          python -m alembic heads
+          test "$heads" -eq 1 || { echo "::error::alembic has $heads heads; the migration chain has branched"; exit 1; }
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Type-check and build
+        working-directory: frontend
+        run: npm run build
+
+  image:
+    name: container image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Builds the two-stage image without pushing: the SPA and the API share one origin, so a
+      # frontend build failure has to fail here rather than at deploy time.
+      - name: Build
+        run: docker build --build-arg APP_VERSION=${{ github.sha }} -t azure-vm-scheduler:ci .
+      - name: Smoke test
+        run: |
+          docker run -d --rm --name azureops-ci -p 8020:8000 azure-vm-scheduler:ci
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8020/api/health > /dev/null; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8020/api/health
+          curl -fsS http://127.0.0.1:8020/ | grep -q "Azure VM Scheduler"
+          docker stop azureops-ci

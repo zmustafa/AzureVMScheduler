@@ -32,9 +32,9 @@ frontend/dist/
 .vscode/*.local.json
 
 # Local agent tooling, kept out of the published repository by request.
-# NOTE: this ignores copilot-instructions.md and would ignore any Actions workflow placed
-# under .github/ too. Narrow to `.github/agents/` if you later want CI or shared instructions.
-.github/
+# Narrowed from `.github/` so Actions workflows are published while the agent files stay local.
+.github/agents/
+.github/copilot-instructions.md
 UITestAgent.md
 
 # Internal design and improvement notes — not part of the published repository.
