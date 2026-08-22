@@ -112,7 +112,7 @@ def _readiness(
     connections: list[dict[str, Any]],
     schedules: list[Schedule],
     tree: GroupTree,
-    index: ScheduleIndex,
+    owners_by_vm: dict[str, tuple[Schedule | None, Schedule | None]],
     machines: list[VirtualMachine],
     schedule_vm_counts: dict[str, int],
     stuck_runs: list[ScheduleRun],
@@ -151,9 +151,10 @@ def _readiness(
         )
         if not resolved:
             continue
-        if effective_schedule(index, tree, machine, "start"):
+        start_owner, stop_owner = owners_by_vm.get(machine.id, (None, None))
+        if start_owner:
             used_connections.add(resolved)
-        if effective_schedule(index, tree, machine, "stop") and not is_stop_protected(tree, machine):
+        if stop_owner and not is_stop_protected(tree, machine):
             used_connections.add(resolved)
             stop_connections.add(resolved)
 
@@ -243,7 +244,7 @@ def _readiness(
                     "link": f"/schedules/{schedule.id}",
                 })
 
-    checks.extend(_overlap_checks(schedules, tree, index, machines, schedule_vm_counts))
+    checks.extend(_overlap_checks(schedules, owners_by_vm, schedule_vm_counts))
 
     if stuck_runs:
         checks.append({
@@ -295,9 +296,7 @@ def _wave_window(schedule: Schedule, vm_count: int) -> tuple[int, int] | None:
 
 def _overlap_checks(
     schedules: list[Schedule],
-    tree: GroupTree,
-    index: ScheduleIndex,
-    machines: list[VirtualMachine],
+    owners_by_vm: dict[str, tuple[Schedule | None, Schedule | None]],
     schedule_vm_counts: dict[str, int],
 ) -> list[dict[str, Any]]:
     """A stop landing inside a start window would kill the wave it collides with."""
@@ -311,11 +310,10 @@ def _overlap_checks(
     # Only compare schedules that actually share machines, and only within the same timezone —
     # comparing wall-clock times across zones would produce false alarms.
     owners: dict[str, set[str]] = {}
-    for machine in machines:
-        for action in ("start", "stop"):
-            owner = effective_schedule(index, tree, machine, action)
+    for vm_id, pair in owners_by_vm.items():
+        for owner in pair:
             if owner:
-                owners.setdefault(owner.id, set()).add(machine.id)
+                owners.setdefault(owner.id, set()).add(vm_id)
 
     for stop in stops:
         stop_window = _wave_window(stop, schedule_vm_counts.get(stop.id, 0))
@@ -369,8 +367,10 @@ async def build_overview(
     applications = [node for node in tree.by_id.values() if node.depth == 0]
     enabled_vms = [item for item in machines if item.enabled]
 
-    # -- schedule resolution (one pass per action, reused by several panels) -----
+    # -- schedule resolution (one pass per action, reused by every panel below) -----
     schedule_vm_counts: dict[str, int] = defaultdict(int)
+    owners_by_vm: dict[str, tuple[Schedule | None, Schedule | None]] = {}
+    machines_by_id = {item.id: item for item in machines}
     uncovered: list[VirtualMachine] = []
     starts_but_never_stops: list[VirtualMachine] = []
     stops_but_never_starts: list[VirtualMachine] = []
@@ -378,6 +378,7 @@ async def build_overview(
     for machine in machines:
         start_owner = effective_schedule(index, tree, machine, "start")
         stop_owner = effective_schedule(index, tree, machine, "stop")
+        owners_by_vm[machine.id] = (start_owner, stop_owner)
         protected = is_stop_protected(tree, machine)
         if protected:
             protected_count += 1
@@ -443,7 +444,7 @@ async def build_overview(
     for schedule in schedules:
         node = tree.get(schedule.target_id) if schedule.target_type == "group" else None
         if node is None and schedule.target_type == "vm":
-            machine = next((item for item in machines if item.id == schedule.target_id), None)
+            machine = machines_by_id.get(schedule.target_id)
             node = tree.get(machine.group_id) if machine else None
         if node:
             chain = list(reversed(tree.chain(node.id)))
@@ -466,7 +467,7 @@ async def build_overview(
     for application in sorted(applications, key=lambda item: (item.sequence, item.name.lower())):
         app_runs = runs_by_app.get(application.id, [])
         members = vms_by_app.get(application.id, [])
-        covered = sum(1 for item in members if effective_schedule(index, tree, item, "start") or effective_schedule(index, tree, item, "stop"))
+        covered = sum(1 for item in members if any(owners_by_vm.get(item.id, (None, None))))
         health.append({
             "id": application.id,
             "name": application.name,
@@ -537,7 +538,6 @@ async def build_overview(
             entry["last_at"] = stamp
             entry["last_message"] = attempt.message
             entry["run_id"] = attempt.run_id
-    machines_by_id = {item.id: item for item in machines}
     for entry in by_vm.values():
         machine = machines_by_id.get(entry["vm_id"] or "")
         if machine:
@@ -547,7 +547,7 @@ async def build_overview(
     # -- coverage gaps ---------------------------------------------------
     disabled_in_scheduled_ring = [
         item for item in machines
-        if not item.enabled and (effective_schedule(index, tree, item, "start") or effective_schedule(index, tree, item, "stop"))
+        if not item.enabled and any(owners_by_vm.get(item.id, (None, None)))
     ]
     apps_without_schedules = [
         {"id": application.id, "name": application.name, "vm_count": len(vms_by_app.get(application.id, []))}
@@ -582,7 +582,7 @@ async def build_overview(
             connections=connections,
             schedules=schedules,
             tree=tree,
-            index=index,
+            owners_by_vm=owners_by_vm,
             machines=machines,
             schedule_vm_counts=schedule_vm_counts,
             stuck_runs=stuck_runs,

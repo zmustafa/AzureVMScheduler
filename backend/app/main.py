@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -45,7 +47,7 @@ from .azure import discover, list_virtual_machines, read_power_states, resolve_v
 from .backup import BackupDocumentError, SECTIONS as BACKUP_SECTIONS, apply_import, build_export, reset_estate
 from .demo import demo_status, load_demo_estate, remove_demo_estate
 from .config import get_settings
-from .connections import decrypt_value, delete_connection, encrypt_value, get_connection, list_connections, resolve_enabled_connection, set_default, update_connection_status, upsert_connection
+from .connections import delete_connection, get_connection, list_connections, resolve_enabled_connection, set_default, signing_key, update_connection_status, upsert_connection
 from .connectors.base import sanitize_detail
 from .connectors.registry import (
     delete_connector,
@@ -403,19 +405,29 @@ def _vm_filter(statement, tree: GroupTree, q: str | None, group_id: str | None, 
     return statement
 
 
+def _preview_digest(rows: list[dict[str, Any]], issued_at: int) -> str:
+    body = json.dumps(rows, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hmac.new(signing_key("import-preview"), f"{issued_at}:".encode("utf-8") + body, hashlib.sha256).hexdigest()
+
+
 def _preview_token(rows: list[dict[str, Any]]) -> str:
-    payload = {"iat": int(utcnow().timestamp()), "rows": rows}
-    return encrypt_value(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    """Authenticate the previewed rows without carrying them.
+
+    The rows are already in the client's hands, so encrypting a second copy into the token only
+    made a 2 MB import ship roughly 2.7 MB of ciphertext out and back again. A digest proves the
+    committed rows are the ones that were previewed, which is the whole point, in 81 bytes.
+    """
+    issued_at = int(utcnow().timestamp())
+    return f"{issued_at}.{_preview_digest(rows, issued_at)}"
 
 
 def _validate_preview_token(token: str, rows: list[dict[str, Any]]) -> None:
     try:
-        payload = json.loads(decrypt_value(token))
-        if int(utcnow().timestamp()) - int(payload["iat"]) > get_settings().import_preview_ttl_seconds:
+        stamp, _, digest = token.partition(".")
+        issued_at = int(stamp)
+        if int(utcnow().timestamp()) - issued_at > get_settings().import_preview_ttl_seconds:
             raise ValueError("expired")
-        expected = json.dumps(payload["rows"], sort_keys=True, separators=(",", ":"))
-        actual = json.dumps(rows, sort_keys=True, separators=(",", ":"))
-        if not secrets.compare_digest(expected, actual):
+        if not secrets.compare_digest(digest, _preview_digest(rows, issued_at)):
             raise ValueError("mismatch")
     except Exception as exc:
         raise HTTPException(status_code=409, detail="Import preview token is invalid, expired, or does not match these rows") from exc

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import os
 import tempfile
@@ -45,13 +47,13 @@ def _derive_fernet_key(passphrase: str) -> bytes:
 
 
 @lru_cache(maxsize=8)
-def _fernet_for(configured: str | None, key_path_text: str) -> Fernet:
-    """Build the cipher once per (configured key, key file) pair.
+def _secret_key_for(configured: str | None, key_path_text: str) -> bytes:
+    """Resolve the instance secret once per (configured key, key file) pair.
 
-    Deriving a key from a passphrase costs 480,000 PBKDF2 iterations. This is called for every
-    secret read and written -- including once per Azure connection on any request that lists them,
-    and on every VM attempt the scheduler makes -- so doing it per call made credential handling
-    the most expensive thing in the process by a wide margin.
+    Deriving a key from a passphrase costs 480,000 PBKDF2 iterations. This backs every secret read
+    and written -- including once per Azure connection on any request that lists them, and on every
+    VM attempt the scheduler makes -- so doing it per call made credential handling the most
+    expensive thing in the process by a wide margin.
     """
     key_path = Path(key_path_text)
     if configured:
@@ -60,17 +62,21 @@ def _fernet_for(configured: str | None, key_path_text: str) -> Fernet:
         candidate = configured.strip()
         try:
             Fernet(candidate.encode())
-            key = candidate.encode()
+            return candidate.encode()
         except (ValueError, TypeError):
-            key = _derive_fernet_key(candidate)
-    elif key_path.exists():
-        key = key_path.read_bytes().strip()
-    else:
-        key = Fernet.generate_key()
-        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(key)
-    return Fernet(key)
+            return _derive_fernet_key(candidate)
+    if key_path.exists():
+        return key_path.read_bytes().strip()
+    key = Fernet.generate_key()
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(key)
+    return key
+
+
+@lru_cache(maxsize=8)
+def _fernet_for(configured: str | None, key_path_text: str) -> Fernet:
+    return Fernet(_secret_key_for(configured, key_path_text))
 
 
 def _fernet() -> Fernet:
@@ -78,9 +84,20 @@ def _fernet() -> Fernet:
     return _fernet_for(get_settings().fernet_key, str(key_path))
 
 
+def signing_key(purpose: str) -> bytes:
+    """A stable secret key for authenticating a payload without encrypting it.
+
+    Namespaced by purpose so a signature minted for one thing cannot be replayed as another.
+    """
+    _, key_path = _paths()
+    root = _secret_key_for(get_settings().fernet_key, str(key_path))
+    return hmac.new(root, purpose.encode("utf-8"), hashlib.sha256).digest()
+
+
 def reset_secret_cache() -> None:
     """Drop the cipher and store caches. For tests that swap the data directory or the key."""
     global _STORE_CACHE
+    _secret_key_for.cache_clear()
     _fernet_for.cache_clear()
     _STORE_CACHE = None
 
