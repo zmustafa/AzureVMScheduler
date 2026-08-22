@@ -15,7 +15,7 @@ from typing import Any, Literal
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import (
@@ -74,6 +74,7 @@ from .hierarchy import (
     next_sequence,
     recompute_subtree,
     resolve_schedule_vms,
+    resolve_schedule_vms_bulk,
 )
 from .models import AuditLog, Group, IdentityProvider, ImportBatch, LoginSession, NotificationDelivery, NotificationEvent, NotificationRule, Schedule, ScheduleRun, SecurityPolicy, User, VirtualMachine, VmAttempt, new_id, utcnow
 from .notifications import EVENT_TYPES, publish, unread_count
@@ -347,6 +348,11 @@ def _sorted(statement, columns: dict[str, Any], sort: str | None, direction: str
 def _ci(column):
     """SQLite sorts text with a binary collation, so 'RG-A' would come before 'rg-a'."""
     return func.lower(column)
+
+
+def _count_if(condition):
+    """Conditional tally usable alongside other aggregates, so one scan answers several counts."""
+    return func.sum(case((condition, 1), else_=0))
 
 
 VM_SORT_COLUMNS = {
@@ -874,18 +880,39 @@ async def dashboard(user: User = Depends(current_user), db: AsyncSession = Depen
     labels = await connection_labels()
     tree = await load_tree(db)
     now = utcnow()
+    late_cutoff = now - timedelta(seconds=policy.schedule_missed_grace_seconds)
+    # One scan per table rather than eleven separate COUNT round trips.
+    schedule_row = (await db.execute(select(
+        func.count(Schedule.id),
+        _count_if(Schedule.enabled.is_(True)),
+        _count_if(and_(Schedule.enabled.is_(True), Schedule.next_run_at.is_not(None), Schedule.next_run_at < late_cutoff)),
+    ).select_from(Schedule))).one()
+    group_row = (await db.execute(select(
+        func.count(Group.id),
+        _count_if(Group.depth == 0),
+        _count_if(Group.depth > 0),
+    ).select_from(Group))).one()
+    vm_row = (await db.execute(select(
+        func.count(VirtualMachine.id),
+        _count_if(VirtualMachine.enabled.is_(True)),
+    ).select_from(VirtualMachine))).one()
+    run_row = (await db.execute(select(
+        _count_if(ScheduleRun.finished_at.is_(None)),
+        _count_if(ScheduleRun.status.in_(["failed", "partially_failed", "timed_out"])),
+    ).select_from(ScheduleRun))).one()
+    failed_attempts = await db.scalar(select(func.count()).select_from(VmAttempt).where(VmAttempt.status.in_(["failed", "timed_out"])))
     counts = {
-        "schedule_count": await db.scalar(select(func.count()).select_from(Schedule)),
-        "enabled_count": await db.scalar(select(func.count()).select_from(Schedule).where(Schedule.enabled.is_(True))),
-        "group_count": await db.scalar(select(func.count()).select_from(Group)),
-        "application_count": await db.scalar(select(func.count()).select_from(Group).where(Group.depth == 0)),
-        "ring_count": await db.scalar(select(func.count()).select_from(Group).where(Group.depth > 0)),
-        "vm_count": await db.scalar(select(func.count()).select_from(VirtualMachine)),
-        "enabled_vm_count": await db.scalar(select(func.count()).select_from(VirtualMachine).where(VirtualMachine.enabled.is_(True))),
-        "failed_attempts": await db.scalar(select(func.count()).select_from(VmAttempt).where(VmAttempt.status.in_(["failed", "timed_out"]))),
-        "running_runs": await db.scalar(select(func.count()).select_from(ScheduleRun).where(ScheduleRun.finished_at.is_(None))),
-        "failed_runs": await db.scalar(select(func.count()).select_from(ScheduleRun).where(ScheduleRun.status.in_(["failed", "partially_failed", "timed_out"]))),
-        "late_start_count": await db.scalar(select(func.count()).select_from(Schedule).where(Schedule.enabled.is_(True), Schedule.next_run_at.is_not(None), Schedule.next_run_at < now - timedelta(seconds=policy.schedule_missed_grace_seconds))),
+        "schedule_count": int(schedule_row[0] or 0),
+        "enabled_count": int(schedule_row[1] or 0),
+        "group_count": int(group_row[0] or 0),
+        "application_count": int(group_row[1] or 0),
+        "ring_count": int(group_row[2] or 0),
+        "vm_count": int(vm_row[0] or 0),
+        "enabled_vm_count": int(vm_row[1] or 0),
+        "failed_attempts": int(failed_attempts or 0),
+        "running_runs": int(run_row[0] or 0),
+        "failed_runs": int(run_row[1] or 0),
+        "late_start_count": int(schedule_row[2] or 0),
     }
     next_schedule = await db.scalar(select(Schedule).where(Schedule.enabled.is_(True), Schedule.next_run_at.is_not(None)).order_by(Schedule.next_run_at).limit(1))
     recent_attempts = (await db.scalars(select(VmAttempt).order_by(VmAttempt.claimed_at.desc()).limit(8))).all()
@@ -1431,13 +1458,14 @@ async def schedules_list(
         )
     total = await db.scalar(select(func.count()).select_from(statement.subquery()))
     ordered = statement.order_by(Schedule.next_run_at.is_(None), Schedule.next_run_at, Schedule.name) if not sort else _sorted(statement, SCHEDULE_SORT_COLUMNS, sort, direction, "name")
-    items = (await db.scalars(ordered.limit(limit).offset(offset))).all()
-    vm_names = dict((await db.execute(select(VirtualMachine.id, VirtualMachine.vm_name))).all())
+    items = list((await db.scalars(ordered.limit(limit).offset(offset))).all())
+    # Only the VM-targeted schedules on this page need a machine name, so the whole inventory is
+    # no longer read to label a handful of rows.
+    vm_targets = [item.target_id for item in items if item.target_type == "vm"]
+    vm_names = dict((await db.execute(select(VirtualMachine.id, VirtualMachine.vm_name).where(VirtualMachine.id.in_(vm_targets)))).all()) if vm_targets else {}
     index = await load_schedule_index(db)
-    payloads = []
-    for item in items:
-        vms = await resolve_schedule_vms(db, item, tree, index)
-        payloads.append({**schedule_payload(tree, item, labels, vm_names), "vm_count": len(vms)})
+    resolved = await resolve_schedule_vms_bulk(db, items, tree, index)
+    payloads = [{**schedule_payload(tree, item, labels, vm_names), "vm_count": len(resolved.get(item.id, []))} for item in items]
     return {"items": payloads, "total": total or 0, "limit": limit, "offset": offset}
 
 
@@ -1502,10 +1530,11 @@ async def schedules_upcoming(limit: int = Query(10, ge=1, le=100), user: User = 
     tree = await load_tree(db)
     labels = await connection_labels()
     index = await load_schedule_index(db)
-    schedules = (await db.scalars(select(Schedule).where(Schedule.enabled.is_(True), Schedule.next_run_at.is_not(None)).order_by(Schedule.next_run_at).limit(limit))).all()
+    schedules = list((await db.scalars(select(Schedule).where(Schedule.enabled.is_(True), Schedule.next_run_at.is_not(None)).order_by(Schedule.next_run_at).limit(limit))).all())
+    resolved = await resolve_schedule_vms_bulk(db, schedules, tree, index)
     waves = []
     for schedule in schedules:
-        vms = await resolve_schedule_vms(db, schedule, tree, index)
+        vms = resolved.get(schedule.id, [])
         connection_id = (effective_connection_id(tree, vms[0]) if vms else None) or schedule.azure_connection_id
         waves.append({
             "schedule_id": schedule.id,
@@ -1540,10 +1569,11 @@ async def timeline(
     tree = await load_tree(db)
     labels = await connection_labels()
     index = await load_schedule_index(db)
-    schedules = (await db.scalars(select(Schedule).where(Schedule.enabled.is_(True)))).all()
+    schedules = list((await db.scalars(select(Schedule).where(Schedule.enabled.is_(True)))).all())
+    resolved = await resolve_schedule_vms_bulk(db, schedules, tree, index)
     blocks: list[dict[str, Any]] = []
     for schedule in schedules:
-        vms = await resolve_schedule_vms(db, schedule, tree, index)
+        vms = resolved.get(schedule.id, [])
         recurrence = recurrence_of(schedule)
         cursor = window_start - timedelta(seconds=1)
         # A dense cron (say every 15 minutes) can fill the window on its own, so cap per schedule.

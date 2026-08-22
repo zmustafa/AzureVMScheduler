@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Group, Schedule, VirtualMachine, new_id
@@ -30,17 +30,40 @@ def group_kind(depth: int) -> str:
 
 @dataclass
 class GroupTree:
+    """An in-memory snapshot of the group hierarchy for the life of one request.
+
+    Every derived lookup is memoized. ``chain`` alone backs ``name_path``, ``is_active``,
+    ``is_stop_protected``, ``effective_connection_id`` and the wave ordering key, so on a listing
+    it is called several times per row; recomputing it from the path string each time made the
+    overview quadratic in the size of the estate.
+    """
+
     by_id: dict[str, Group] = field(default_factory=dict)
+    _chains: dict[str, list[Group]] = field(default_factory=dict, repr=False, compare=False)
+    _subtrees: dict[str, set[str]] = field(default_factory=dict, repr=False, compare=False)
+    _children: dict[str | None, list[Group]] | None = field(default=None, repr=False, compare=False)
 
     def get(self, group_id: str | None) -> Group | None:
         return self.by_id.get(group_id or "")
+
+    def children_of(self, group_id: str | None) -> list[Group]:
+        if self._children is None:
+            index: dict[str | None, list[Group]] = {}
+            for node in self.by_id.values():
+                index.setdefault(node.parent_id, []).append(node)
+            self._children = index
+        return self._children.get(group_id, [])
 
     def chain(self, group_id: str | None) -> list[Group]:
         """Nearest-first chain: [self, parent, ..., root]."""
         node = self.get(group_id)
         if not node:
             return []
-        return [self.by_id[item] for item in reversed(path_ids(node.path)) if item in self.by_id]
+        cached = self._chains.get(node.id)
+        if cached is None:
+            cached = [self.by_id[item] for item in reversed(path_ids(node.path)) if item in self.by_id]
+            self._chains[node.id] = cached
+        return cached
 
     def name_path(self, group_id: str | None) -> str:
         return " / ".join(node.name for node in reversed(self.chain(group_id)))
@@ -53,7 +76,20 @@ class GroupTree:
         root = self.get(group_id)
         if not root:
             return set()
-        return {node.id for node in self.by_id.values() if node.path.startswith(root.path)}
+        cached = self._subtrees.get(root.id)
+        if cached is None:
+            # Walked through the child index rather than scanning every node, so listing a whole
+            # tree costs one pass in total instead of one pass per group.
+            found = {root.id}
+            pending = [root.id]
+            while pending:
+                for child in self.children_of(pending.pop()):
+                    if child.id not in found:
+                        found.add(child.id)
+                        pending.append(child.id)
+            cached = found
+            self._subtrees[root.id] = cached
+        return cached
 
 
 async def load_tree(db: AsyncSession) -> GroupTree:
@@ -201,25 +237,29 @@ def effective_connection_id(tree: GroupTree, vm: VirtualMachine) -> str | None:
     return None
 
 
-async def resolve_schedule_vms(
-    db: AsyncSession,
+#: Above this many group ids an IN clause stops being worth building and the whole inventory is
+#: cheaper to fetch in one go. Also keeps us clear of SQLite's bound-parameter ceiling.
+_BULK_GROUP_LIMIT = 400
+
+
+def _select_for_schedule(
     schedule: Schedule,
-    tree: GroupTree | None = None,
-    index: ScheduleIndex | None = None,
+    tree: GroupTree,
+    index: ScheduleIndex,
+    by_group: dict[str, list[VirtualMachine]],
+    by_id: dict[str, VirtualMachine],
 ) -> list[VirtualMachine]:
-    """VMs a wave should act on: enabled, inside the target subtree, and not shadowed by a nearer
-    schedule for the same action. Stop waves additionally skip protected machines."""
-    tree = tree or await load_tree(db)
-    index = index or await load_schedule_index(db)
+    """The selection rule for one wave, against already-loaded machines.
+
+    Single source of truth for what a wave acts on; both the single and bulk resolvers use it so
+    they can never drift apart.
+    """
     action = schedule.action or "start"
     if schedule.target_type == "vm":
-        vm = await db.get(VirtualMachine, schedule.target_id)
-        candidates = [vm] if vm else []
+        found = by_id.get(schedule.target_id)
+        candidates = [found] if found else []
     else:
-        subtree = tree.subtree_ids(schedule.target_id)
-        if not subtree:
-            return []
-        candidates = list((await db.scalars(select(VirtualMachine).where(VirtualMachine.group_id.in_(list(subtree))))).all())
+        candidates = [vm for group_id in tree.subtree_ids(schedule.target_id) for vm in by_group.get(group_id, ())]
     selected = [
         vm
         for vm in candidates
@@ -232,6 +272,70 @@ async def resolve_schedule_vms(
     # Rings normally unwind in reverse for stops, so the canary ring is the last one down.
     reverse = action == "stop" and (schedule.ring_order or "sequence") == "reverse"
     return sorted(selected, key=lambda item: _order_key(tree, item), reverse=reverse)
+
+
+async def _load_candidates(
+    db: AsyncSession,
+    schedules: list[Schedule],
+    tree: GroupTree,
+) -> tuple[dict[str, list[VirtualMachine]], dict[str, VirtualMachine]]:
+    """Fetch every machine the given schedules could possibly touch, in one query."""
+    group_ids: set[str] = set()
+    vm_ids: set[str] = set()
+    for schedule in schedules:
+        if schedule.target_type == "vm":
+            vm_ids.add(schedule.target_id)
+        else:
+            group_ids |= tree.subtree_ids(schedule.target_id)
+
+    statement = select(VirtualMachine)
+    if not group_ids and not vm_ids:
+        return {}, {}
+    if len(group_ids) <= _BULK_GROUP_LIMIT:
+        clauses = []
+        if group_ids:
+            clauses.append(VirtualMachine.group_id.in_(list(group_ids)))
+        if vm_ids:
+            clauses.append(VirtualMachine.id.in_(list(vm_ids)))
+        statement = statement.where(or_(*clauses)) if len(clauses) > 1 else statement.where(clauses[0])
+
+    by_group: dict[str, list[VirtualMachine]] = {}
+    by_id: dict[str, VirtualMachine] = {}
+    for vm in (await db.scalars(statement)).all():
+        by_group.setdefault(vm.group_id, []).append(vm)
+        by_id[vm.id] = vm
+    return by_group, by_id
+
+
+async def resolve_schedule_vms_bulk(
+    db: AsyncSession,
+    schedules: list[Schedule],
+    tree: GroupTree | None = None,
+    index: ScheduleIndex | None = None,
+) -> dict[str, list[VirtualMachine]]:
+    """Resolve many waves at once, keyed by schedule id.
+
+    One query for every schedule on the page rather than one query each: the listings page 200
+    schedules at a time, so the per-schedule form turned a single request into 200 round trips.
+    """
+    if not schedules:
+        return {}
+    tree = tree or await load_tree(db)
+    index = index or await load_schedule_index(db)
+    by_group, by_id = await _load_candidates(db, schedules, tree)
+    return {schedule.id: _select_for_schedule(schedule, tree, index, by_group, by_id) for schedule in schedules}
+
+
+async def resolve_schedule_vms(
+    db: AsyncSession,
+    schedule: Schedule,
+    tree: GroupTree | None = None,
+    index: ScheduleIndex | None = None,
+) -> list[VirtualMachine]:
+    """VMs a wave should act on: enabled, inside the target subtree, and not shadowed by a nearer
+    schedule for the same action. Stop waves additionally skip protected machines."""
+    resolved = await resolve_schedule_vms_bulk(db, [schedule], tree, index)
+    return resolved.get(schedule.id, [])
 
 
 def _order_key(tree: GroupTree, vm: VirtualMachine) -> tuple[list[tuple[int, str]], str, str]:
