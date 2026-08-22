@@ -104,13 +104,30 @@ async def role_ids_for(db: AsyncSession, user_id: str) -> set[str]:
 
 
 async def effective_permissions(db: AsyncSession, user: User) -> set[str]:
-    """Resolve what a user may actually do, right now."""
-    ids = await role_ids_for(db, user.id)
-    if not ids:
-        return set()
+    """Resolve what a user may actually do, right now.
+
+    Runs on every authenticated request, so it reads the permission payloads directly rather than
+    collecting role ids first and fetching the rows in a second round trip.
+    """
     granted: set[str] = set()
-    for role in (await db.scalars(select(Role).where(Role.id.in_(list(ids))))).all():
-        granted |= expand(role.permissions_json or [])
+    seen: set[str] = set()
+
+    direct = await db.execute(
+        select(Role.id, Role.permissions_json).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user.id)
+    )
+    for role_id, permissions in direct.all():
+        seen.add(role_id)
+        granted |= expand(permissions or [])
+
+    carried = (await db.scalars(
+        select(AccessGroup.role_ids_json)
+        .join(UserAccessGroup, UserAccessGroup.access_group_id == AccessGroup.id)
+        .where(UserAccessGroup.user_id == user.id)
+    )).all()
+    extra = {str(item) for payload in carried for item in (payload or [])} - seen
+    if extra:
+        for permissions in (await db.scalars(select(Role.permissions_json).where(Role.id.in_(list(extra))))).all():
+            granted |= expand(permissions or [])
     return granted
 
 
@@ -131,21 +148,31 @@ async def assert_admin_remains(db: AsyncSession, *, ignore_user_id: str | None =
     Roles are editable, so without this an administrator can lock everyone out with two clicks and
     the only way back in is editing the database by hand.
     """
-    admin_roles = [
+    admin_roles = {
         role.id for role in (await db.scalars(select(Role))).all()
         if "*" in (role.permissions_json or []) or "users.manage" in (role.permissions_json or [])
-    ]
+    }
     if not admin_roles:
         raise AccessError("At least one role must keep the users.manage permission")
     if not await db.scalar(select(User.id).limit(1)):
         # No accounts exist yet, so there is nobody to lock out. An empty table is a fresh install;
         # accounts that all happen to be *disabled* is a genuine lock-out and still fails below.
         return
-    for user in (await db.scalars(select(User).where(User.disabled.is_(False)))).all():
-        if ignore_user_id and user.id == ignore_user_id:
-            continue
-        if await role_ids_for(db, user.id) & set(admin_roles):
-            return
+    # Resolved in bulk: asking per user cost three queries each, so this guard grew with the size
+    # of the directory even though it runs on every role and membership change.
+    admin_groups = {
+        group.id for group in (await db.scalars(select(AccessGroup))).all()
+        if admin_roles & {str(item) for item in (group.role_ids_json or [])}
+    }
+    holders = set((await db.scalars(select(UserRole.user_id).where(UserRole.role_id.in_(list(admin_roles))))).all())
+    if admin_groups:
+        holders |= set((await db.scalars(
+            select(UserAccessGroup.user_id).where(UserAccessGroup.access_group_id.in_(list(admin_groups)))
+        )).all())
+    enabled = set((await db.scalars(select(User.id).where(User.disabled.is_(False)))).all())
+    enabled.discard(ignore_user_id or "")
+    if holders & enabled:
+        return
     raise AccessError("At least one enabled user must keep a role that grants users.manage")
 
 

@@ -205,6 +205,13 @@ _NO_ACCESS_ALLOWLIST = frozenset({
 })
 
 
+#: How stale ``last_seen_at`` may get before a request refreshes it. Writing it on every request
+#: puts a write transaction in front of every read, and on SQLite's single writer that serializes
+#: the whole API behind the scheduler's own writes. The idle timeout is measured in minutes, so
+#: refreshing at most this often costs it nothing.
+_LAST_SEEN_REFRESH_SECONDS = 30
+
+
 async def current_session(request: Request, db: AsyncSession = Depends(get_db)) -> tuple[LoginSession, User]:
     raw = request.cookies.get(SESSION_COOKIE)
     if not raw:
@@ -234,10 +241,15 @@ async def current_session(request: Request, db: AsyncSession = Depends(get_db)) 
     if not granted and path not in _NO_ACCESS_ALLOWLIST:
         raise HTTPException(status_code=403, detail="This account has no access. Ask an administrator to assign a role.")
 
-    record.last_seen_at = now
-    await db.commit()
+    # Always refresh at least twice within the idle window, so a short window still behaves.
+    refresh_after = min(_LAST_SEEN_REFRESH_SECONDS, max(policy.session_idle_minutes * 30, 1))
+    pending = bool(db.new or db.deleted or db.dirty)
+    if (now - last_seen).total_seconds() >= refresh_after:
+        record.last_seen_at = now
+        pending = True
+    if pending:
+        await db.commit()
     return record, user
-
 
 async def current_user(auth: tuple[LoginSession, User] = Depends(current_session)) -> User:
     return auth[1]

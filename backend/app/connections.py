@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -43,13 +44,20 @@ def _derive_fernet_key(passphrase: str) -> bytes:
     return base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
 
 
-def _fernet() -> Fernet:
-    settings = get_settings()
-    _, key_path = _paths()
-    if settings.fernet_key:
+@lru_cache(maxsize=8)
+def _fernet_for(configured: str | None, key_path_text: str) -> Fernet:
+    """Build the cipher once per (configured key, key file) pair.
+
+    Deriving a key from a passphrase costs 480,000 PBKDF2 iterations. This is called for every
+    secret read and written -- including once per Azure connection on any request that lists them,
+    and on every VM attempt the scheduler makes -- so doing it per call made credential handling
+    the most expensive thing in the process by a wide margin.
+    """
+    key_path = Path(key_path_text)
+    if configured:
         # Accept either a real Fernet key or any passphrase. Deployment templates and operators
         # cannot reliably produce 32 url-safe base64 bytes, so a plain string must work too.
-        candidate = settings.fernet_key.strip()
+        candidate = configured.strip()
         try:
             Fernet(candidate.encode())
             key = candidate.encode()
@@ -63,6 +71,18 @@ def _fernet() -> Fernet:
         with os.fdopen(fd, "wb") as handle:
             handle.write(key)
     return Fernet(key)
+
+
+def _fernet() -> Fernet:
+    _, key_path = _paths()
+    return _fernet_for(get_settings().fernet_key, str(key_path))
+
+
+def reset_secret_cache() -> None:
+    """Drop the cipher and store caches. For tests that swap the data directory or the key."""
+    global _STORE_CACHE
+    _fernet_for.cache_clear()
+    _STORE_CACHE = None
 
 
 def encrypt_value(value: str) -> str:
@@ -115,17 +135,34 @@ PERMISSION_DEFAULTS: dict[str, Any] = {
 }
 
 
+#: Parsed store, keyed on what the file looked like when it was read. Every API response that
+#: labels a tenant reads this, so re-parsing it from disk each time put blocking file I/O on the
+#: event loop for effectively every request.
+_STORE_CACHE: tuple[str, int, int, list[dict[str, Any]]] | None = None
+
+
 def _load_raw() -> list[dict[str, Any]]:
+    global _STORE_CACHE
     path, _ = _paths()
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        _STORE_CACHE = None
         return []
+    signature = (str(path), stat.st_mtime_ns, stat.st_size)
+    if _STORE_CACHE is not None and _STORE_CACHE[:3] == signature:
+        return [dict(item) for item in _STORE_CACHE[3]]
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError("Azure connections store must contain a JSON array")
-    return [{**PERMISSION_DEFAULTS, **item} for item in data]
+    items = [{**PERMISSION_DEFAULTS, **item} for item in data]
+    _STORE_CACHE = (*signature, items)
+    # Copied on the way out so a caller mutating a record cannot corrupt the cache.
+    return [dict(item) for item in items]
 
 
 def _write_atomic(items: list[dict[str, Any]]) -> None:
+    global _STORE_CACHE
     path, _ = _paths()
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix="connections-", suffix=".tmp", dir=path.parent)
@@ -138,6 +175,9 @@ def _write_atomic(items: list[dict[str, Any]]) -> None:
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
+    # Invalidated explicitly rather than trusting mtime: a write landing inside the filesystem's
+    # timestamp resolution would otherwise leave the previous contents cached.
+    _STORE_CACHE = None
 
 
 def _decrypt(item: dict[str, Any]) -> dict[str, Any]:
