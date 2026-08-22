@@ -376,6 +376,15 @@ class VmAttempt(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     schedule: Mapped[Schedule | None] = relationship(back_populates="attempts")
 
+    __table_args__ = (
+        # Finalising a wave tallies its attempts by status.
+        Index("ix_vm_attempts_run_status", "run_id", "status"),
+        # Every start checks whether the opposite action is already in flight for the same machine.
+        Index("ix_vm_attempts_vm_action_status", "vm_id", "action", "status"),
+        # The schedule detail page reads the newest attempts for one schedule.
+        Index("ix_vm_attempts_schedule_claimed", "schedule_id", "claimed_at"),
+    )
+
 
 class ImportBatch(Base):
     __tablename__ = "import_batches"

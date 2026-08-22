@@ -4,12 +4,11 @@ import asyncio
 import logging
 import random
 import socket
-from typing import Any, cast
+from typing import Any
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, or_, select, update
-from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .azure import AzurePermanentError, AzureTransientError, get_vm_adapter, resolve_action_mode
@@ -18,7 +17,7 @@ from .connections import get_connection
 from .database import SessionLocal
 from . import firewall
 from .hierarchy import effective_connection_id, is_stop_protected, load_schedule_index, load_tree, resolve_schedule_vms
-from .models import AuditLog, Schedule, ScheduleRun, SecurityPolicy, VirtualMachine, VmAttempt, new_id, utcnow
+from .models import AuditLog, Group, Schedule, ScheduleRun, SecurityPolicy, VirtualMachine, VmAttempt, new_id, utcnow
 from .notifications import publish, run_daily_digests
 from .recurrence import Recurrence, localize as localize_wall_clock
 from .recurrence import next_occurrence as recurrence_next
@@ -127,20 +126,29 @@ async def claim_due_schedules(session: AsyncSession, worker_id: str, limit: int 
         .limit(batch)
     )
     claimed: list[str] = []
-    for schedule_id in due.all():
-        result = cast(CursorResult[Any], await session.execute(
+    schedule_ids = list(due.all())
+    if schedule_ids:
+        # One conditional UPDATE for the whole batch rather than one per schedule. The lease is
+        # still optimistic: only rows that satisfied the guards carry our owner afterwards, so a
+        # schedule another worker took in the meantime simply is not returned.
+        await session.execute(
             update(Schedule)
             .where(
-                Schedule.id == schedule_id,
+                Schedule.id.in_(schedule_ids),
                 Schedule.enabled.is_(True),
                 Schedule.next_run_at.is_not(None),
                 Schedule.next_run_at <= now,
                 or_(Schedule.lease_until.is_(None), Schedule.lease_until < now),
             )
             .values(lease_owner=worker_id, lease_until=lease_until)
-        ))
-        if result.rowcount == 1:
-            claimed.append(schedule_id)
+        )
+        claimed = list((await session.scalars(
+            select(Schedule.id).where(
+                Schedule.id.in_(schedule_ids),
+                Schedule.lease_owner == worker_id,
+                Schedule.lease_until == lease_until,
+            )
+        )).all())
     await session.commit()
     return claimed
 
@@ -198,13 +206,20 @@ async def finalize_run_if_complete(session: AsyncSession, run_id: str) -> Schedu
     run = await session.get(ScheduleRun, run_id)
     if not run or run.finished_at:
         return run
-    attempts = (await session.scalars(select(VmAttempt).where(VmAttempt.run_id == run_id))).all()
-    statuses = [item.status for item in attempts]
-    run.total_count = len(attempts)
+    # Called after every attempt finishes, so a 30-VM wave calls it 30 times. Reading all 30 rows
+    # each time made finishing a wave quadratic in its size; the tallies are all this needs.
+    tallies = (await session.execute(
+        select(VmAttempt.status, VmAttempt.mode, func.count())
+        .where(VmAttempt.run_id == run_id)
+        .group_by(VmAttempt.status, VmAttempt.mode)
+    )).all()
+    statuses = [value for value, _mode, count in tallies for _ in range(count)]
+    modes = [mode for _value, mode, count in tallies for _ in range(count)]
+    run.total_count = len(statuses)
     run.succeeded_count = sum(status == "succeeded" for status in statuses)
     run.failed_count = sum(status in {"failed", "timed_out"} for status in statuses)
     run.skipped_count = sum(status in {"skipped", "cancelled"} for status in statuses)
-    run.mode = roll_up_mode([item.mode for item in attempts])
+    run.mode = roll_up_mode(modes)
     status = roll_up_run_status(statuses)
     run.started_at = run.started_at or utcnow()
     if status == "running":
@@ -234,7 +249,10 @@ async def finalize_run_if_complete(session: AsyncSession, run_id: str) -> Schedu
         schedule.lease_until = None
     session.add(AuditLog(actor_id=run.triggered_by, action="schedule.run_completed", target_type="schedule_run", target_id=run.id, detail=f'{{"schedule_id":"{run.schedule_id or ""}","status":"{run.status}","total":{run.total_count},"succeeded":{run.succeeded_count},"failed":{run.failed_count},"skipped":{run.skipped_count}}}'))
     await session.commit()
-    await _publish_run_event(session, run, schedule, list(attempts))
+    # The full rows are only needed to describe the wave in an event, so they are read once here
+    # rather than on every one of the calls that found the wave still running.
+    attempts = list((await session.scalars(select(VmAttempt).where(VmAttempt.run_id == run_id))).all()) if run.status in RUN_EVENTS else []
+    await _publish_run_event(session, run, schedule, attempts)
     return run
 
 
@@ -258,10 +276,26 @@ async def _schedule_group_id(session: AsyncSession, schedule: Schedule | None) -
 
 
 async def _hierarchy_labels(session: AsyncSession, group_id: str | None) -> tuple[str, str]:
-    chain = (await load_tree(session)).chain(group_id)
+    """(application, ring) names for a group.
+
+    Read through the group's own path rather than by loading the tree: this runs once per published
+    event, and a wave that fails thirty machines would otherwise read the whole groups table thirty
+    times to name the same two rows.
+    """
+    if not group_id:
+        return "", ""
+    node = await session.get(Group, group_id)
+    if not node:
+        return "", ""
+    ancestry = [item for item in (node.path or "").split("/") if item]
+    if not ancestry:
+        return node.name, ""
+    found = {item.id: item for item in (await session.scalars(select(Group).where(Group.id.in_(ancestry)))).all()}
+    chain = [found[item] for item in ancestry if item in found]
     if not chain:
         return "", ""
-    return chain[-1].name, (chain[0].name if chain[0].depth else "")
+    leaf = chain[-1]
+    return chain[0].name, (leaf.name if leaf.depth else "")
 
 
 async def _publish_run_event(session: AsyncSession, run: ScheduleRun, schedule: Schedule | None, attempts: list[VmAttempt]) -> None:
@@ -527,11 +561,10 @@ class SchedulerService:
         except Exception as exc:
             await self._finish(attempt_id, "skipped", f"Azure connection unavailable: {exc}")
             return
-        await self._set_mode(attempt_id, mode)
         try:
             subscription = parse_vm_resource_id(resource_id).subscription_id
         except ValueError as exc:
-            await self._finish(attempt_id, "failed", str(exc))
+            await self._finish(attempt_id, "failed", str(exc), mode)
             return
         delay = 1.0
         for round_number in range(self.settings.azure_start_max_retries + 1):
@@ -544,21 +577,24 @@ class SchedulerService:
                 break
             except AzureTransientError as exc:
                 if round_number >= self.settings.azure_start_max_retries:
-                    await self._finish(attempt_id, "failed", f"Azure kept throttling the {action} request: {exc}")
+                    await self._finish(attempt_id, "failed", f"Azure kept throttling the {action} request: {exc}", mode)
                     return
                 wait = min(exc.retry_after or delay, 60) + random.uniform(0, 1)
                 delay = min(delay * 2, 60)
                 await asyncio.sleep(wait)
             except (AzurePermanentError, ValueError) as exc:
-                await self._finish(attempt_id, "failed", str(exc))
+                await self._finish(attempt_id, "failed", str(exc), mode)
                 return
             except Exception as exc:  # operational failures are persisted, never raised
-                await self._finish(attempt_id, "failed", str(exc))
+                await self._finish(attempt_id, "failed", str(exc), mode)
                 return
         async with SessionLocal() as session:
             attempt = await session.get(VmAttempt, attempt_id)
             if attempt and attempt.status == "starting":
+                # Carried here rather than in a transaction of its own: the resolved mode has
+                # nowhere useful to be until the attempt moves on anyway.
                 attempt.status = MONITORING_STATUS
+                attempt.mode = mode
                 await session.commit()
         await self._monitor_queue.put(attempt_id)
 
@@ -581,20 +617,15 @@ class SchedulerService:
             return
         await self._finish(attempt_id, "succeeded", f"VM reached {state} state")
 
-    async def _set_mode(self, attempt_id: str, mode: str) -> None:
-        async with SessionLocal() as session:
-            attempt = await session.get(VmAttempt, attempt_id)
-            if attempt:
-                attempt.mode = mode
-                await session.commit()
-
-    async def _finish(self, attempt_id: str, status: str, message: str) -> None:
+    async def _finish(self, attempt_id: str, status: str, message: str, mode: str | None = None) -> None:
         async with SessionLocal() as session:
             attempt = await session.get(VmAttempt, attempt_id)
             if not attempt:
                 return
             attempt.status = status
             attempt.message = message[:2000]
+            if mode:
+                attempt.mode = mode
             attempt.completed_at = utcnow()
             await session.commit()
             await _publish_attempt_event(session, attempt)
