@@ -25,17 +25,17 @@ from .auth import (
     bootstrap_admin,
     clear_session_cookies,
     create_login_session,
-        get_identity_provider,
-        get_security_policy,
-        has_permission,
     current_user,
+    get_identity_provider,
+    get_security_policy,
+    has_permission,
     hash_password,
     needs_rehash,
-    require_admin,
     require_csrf,
     require_permission,
     token_hash,
     validate_password,
+    verify_dummy_password,
     verify_password,
 )
 from .access import cached_permissions
@@ -157,7 +157,17 @@ async def lifespan(_: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(title="Azure VM Scheduler API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Azure VM Scheduler API",
+    version="0.1.0",
+    lifespan=lifespan,
+    # The schema and the interactive explorers are unauthenticated by construction, so outside a
+    # development checkout they are switched off rather than handing an anonymous caller the full
+    # route map, parameter names and validation rules.
+    openapi_url="/openapi.json" if get_settings().environment.lower() == "development" else None,
+    docs_url="/docs" if get_settings().environment.lower() == "development" else None,
+    redoc_url="/redoc" if get_settings().environment.lower() == "development" else None,
+)
 app.include_router(access_router)
 
 logger = logging.getLogger(__name__)
@@ -284,6 +294,12 @@ def attempt_payload(attempt: VmAttempt, labels: dict[str, dict[str, Any]]) -> di
 
 def run_payload(run: ScheduleRun, labels: dict[str, dict[str, Any]], connection_id: str | None = None) -> dict[str, Any]:
     return {**RunView.model_validate(run).model_dump(mode="json"), **connection_fields(labels, connection_id)}
+
+
+def require_manage(user: User, permission: str) -> None:
+    """Capability gate for routes that already depend on require_csrf for the CSRF check."""
+    if not has_permission(user, permission):
+        raise HTTPException(status_code=403, detail=f"Permission required: {permission}")
 
 
 async def load_group(db: AsyncSession, group_id: str) -> Group:
@@ -515,6 +531,10 @@ async def login(payload: LoginRequest, request: Request, response: Response, db:
     locked_until = _aware(user.locked_until) if user else None
     if locked_until is not None and locked_until > now:
         raise HTTPException(status_code=423, detail="Account is temporarily locked")
+    if not (user and user.password_hash):
+        # Spend the same Argon2 work on a miss, or the response latency reveals which usernames
+        # exist even though the body is identical either way.
+        verify_dummy_password(payload.password)
     valid = bool(user and user.password_hash and verify_password(user.password_hash, payload.password))
     if not user or user.disabled or not valid:
         if user and not user.disabled:
@@ -664,16 +684,43 @@ async def me(user: User = Depends(current_user), db: AsyncSession = Depends(get_
 
 
 @app.post("/api/auth/change-password")
-async def change_password(payload: ChangePasswordRequest, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    if not user.password_hash or not verify_password(user.password_hash, payload.current_password):
-        raise HTTPException(status_code=400, detail="Current password is incorrect")
+async def change_password(payload: ChangePasswordRequest, request: Request, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
     policy = await get_security_policy(db)
+    # Same brute-force controls as sign-in: without them a stolen session cookie turns this into
+    # an unthrottled oracle for the account's current password.
+    ip = ip_lockout.client_ip(request)
+    blocked_for = await ip_lockout.check(db, policy, ip)
+    if blocked_for is not None:
+        raise HTTPException(status_code=429, detail=f"Too many attempts. Try again in {blocked_for} seconds.")
+    locked_until = _aware(user.locked_until)
+    if locked_until is not None and locked_until > utcnow():
+        raise HTTPException(status_code=423, detail="Account is temporarily locked")
+    if not user.password_hash or not verify_password(user.password_hash, payload.current_password):
+        user.failed_login_count += 1
+        if user.failed_login_count >= policy.lockout_attempts:
+            user.locked_until = utcnow() + timedelta(minutes=policy.lockout_minutes)
+            user.failed_login_count = 0
+        await ip_lockout.record_failure(db, policy, ip)
+        audit(db, user, "auth.password_change_failed", "user", user.id)
+        await db.commit()
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
     errors = validate_password(payload.new_password, policy)
     if errors:
         raise HTTPException(status_code=422, detail=errors)
     user.password_hash = hash_password(payload.new_password)
     user.must_change_password = False
-    audit(db, user, "auth.password_changed", "user", user.id)
+    user.failed_login_count = 0
+    user.locked_until = None
+    await ip_lockout.clear(db, ip)
+    # Every other session for this account is dropped: if the password is being changed because it
+    # leaked, the thief's session must not survive the reset.
+    current = token_hash(request.cookies.get(SESSION_COOKIE, ""))
+    revoked = await db.execute(
+        update(LoginSession)
+        .where(LoginSession.user_id == user.id, LoginSession.id != current, LoginSession.revoked_at.is_(None))
+        .values(revoked_at=utcnow())
+    )
+    audit(db, user, "auth.password_changed", "user", user.id, {"other_sessions_revoked": revoked.rowcount})
     await db.commit()
     return {"ok": True, "user": user_view(user)}
 
@@ -687,8 +734,7 @@ async def general_settings(user: User = Depends(current_user), db: AsyncSession 
 
 @app.put("/api/settings/general")
 async def general_settings_update(payload: dict[str, Any], user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Administrator permission required")
+    require_manage(user, "settings.write")
     policy = await get_security_policy(db)
     if "default_timezone" in payload:
         try:
@@ -708,7 +754,7 @@ async def general_settings_update(payload: dict[str, Any], user: User = Depends(
 
 
 @app.get("/api/admin/export")
-async def settings_export(user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def settings_export(user: User = Depends(require_permission("backup.manage")), db: AsyncSession = Depends(get_db)):
     """Portable settings document. Secrets are deliberately absent and must be re-entered after import."""
     document = await build_export(db, await list_connections(public=True), await list_connectors(public=True), app.version)
     audit(db, user, "settings.exported", "backup", None, {"groups": len(document["groups"]), "vms": len(document["virtual_machines"]), "schedules": len(document["schedules"])})
@@ -722,7 +768,7 @@ async def settings_export(user: User = Depends(require_admin), db: AsyncSession 
 
 
 @app.get("/api/admin/import/sections")
-async def settings_import_sections(user: User = Depends(require_admin)):
+async def settings_import_sections(user: User = Depends(require_permission("backup.manage"))):
     return {"sections": list(BACKUP_SECTIONS)}
 
 
@@ -749,8 +795,7 @@ async def _run_import(payload: SettingsImportRequest, user: User, db: AsyncSessi
 
 @app.post("/api/admin/import/preview")
 async def settings_import_preview(payload: SettingsImportRequest, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Administrator permission required")
+    require_manage(user, "backup.manage")
     summary = await _run_import(payload, user, db, dry_run=True)
     await db.rollback()  # a preview never persists anything
     return summary
@@ -758,8 +803,7 @@ async def settings_import_preview(payload: SettingsImportRequest, user: User = D
 
 @app.post("/api/admin/import")
 async def settings_import(payload: SettingsImportRequest, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Administrator permission required")
+    require_manage(user, "backup.manage")
     summary = await _run_import(payload, user, db, dry_run=False)
     audit(db, user, "settings.imported", "backup", None, {"mode": payload.mode, "sections": payload.sections or list(BACKUP_SECTIONS), "created": summary["created"], "skipped": summary["skipped"], "failed": summary["failed"]})
     try:
@@ -773,8 +817,7 @@ async def settings_import(payload: SettingsImportRequest, user: User = Depends(r
 @app.post("/api/admin/reset-estate")
 async def estate_reset(payload: EstateResetRequest, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
     """Destroys every application, ring, VM, schedule and run. Identity, audit and credentials survive."""
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Administrator permission required")
+    require_manage(user, "backup.manage")
     if payload.confirm != "DELETE":
         raise HTTPException(status_code=422, detail="Type DELETE to confirm removing every application, virtual machine and schedule")
     removed = await reset_estate(db)
@@ -1906,8 +1949,7 @@ async def connections_list(user: User = Depends(require_permission("schedules.re
 
 @app.put("/api/connections")
 async def connection_upsert(payload: ConnectionInput, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Administrator permission required")
+    require_manage(user, "connections.manage")
     try:
         result = await upsert_connection(payload.model_dump(exclude_none=True))
     except ValueError as exc:
@@ -1919,8 +1961,7 @@ async def connection_upsert(payload: ConnectionInput, user: User = Depends(requi
 
 @app.delete("/api/connections/{connection_id}")
 async def connection_delete(connection_id: str, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Administrator permission required")
+    require_manage(user, "connections.manage")
     if not await delete_connection(connection_id):
         raise HTTPException(status_code=404, detail="Connection not found")
     audit(db, user, "connection.deleted", "connection", connection_id)
@@ -1930,8 +1971,7 @@ async def connection_delete(connection_id: str, user: User = Depends(require_csr
 
 @app.post("/api/connections/{connection_id}/default")
 async def connection_default(connection_id: str, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Administrator permission required")
+    require_manage(user, "connections.manage")
     try:
         result = await set_default(connection_id)
     except KeyError as exc:
@@ -1974,13 +2014,12 @@ async def connection_live_action(connection_id: str, action: str, user: User, db
 
 @app.post("/api/connections/{connection_id}/test")
 async def connection_test(connection_id: str, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Administrator permission required")
+    require_manage(user, "connections.manage")
     return await connection_live_action(connection_id, "tested", user, db)
 
 
 @app.get("/api/connections/{connection_id}/discover")
-async def connection_discover(connection_id: str, user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def connection_discover(connection_id: str, user: User = Depends(require_permission("connections.manage")), db: AsyncSession = Depends(get_db)):
     return await connection_live_action(connection_id, "discovered", user, db)
 
 
@@ -2086,11 +2125,6 @@ async def audit_list(limit: int = Query(100, ge=1, le=500), action: str | None =
 
 
 # -- connectors --------------------------------------------------------
-
-
-def require_manage(user: User, permission: str) -> None:
-    if not has_permission(user, permission):
-        raise HTTPException(status_code=403, detail=f"Permission required: {permission}")
 
 
 async def load_connector(connector_id: str) -> dict[str, Any]:

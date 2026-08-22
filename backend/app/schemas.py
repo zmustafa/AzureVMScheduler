@@ -33,14 +33,19 @@ def validate_role(value: str) -> str:
     return value
 
 
+#: Nothing legitimate is longer, and an unbounded credential field means an attacker can make the
+#: server buffer and Argon2-compare a multi-megabyte string on an unauthenticated endpoint.
+_CREDENTIAL_MAX = 512
+
+
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(max_length=256)
+    password: str = Field(max_length=_CREDENTIAL_MAX)
 
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str
-    new_password: str
+    current_password: str = Field(max_length=_CREDENTIAL_MAX)
+    new_password: str = Field(max_length=_CREDENTIAL_MAX)
 
 
 class IdentityProviderUpdate(BaseModel):
