@@ -25,4 +25,4 @@ aiohttp>=3.11.11,<4
 python-multipart>=0.0.17,<1
 # SAML assertion parsing and signature verification. Wheels only - no native xmlsec build.
 lxml>=5.3,<7
-signxml>=4.0,<5
+signxml>=5.1.0,<6
