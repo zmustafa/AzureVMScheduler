@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import select
 
 from app.models import Schedule
 
 from test_listing_sort import api_client, seed_export_estate
+
+
+@pytest.fixture(autouse=True)
+def enabled_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_resolve_enabled_connection(_connection_id: str | None) -> dict[str, object]:
+        return {"id": "11111111-1111-1111-1111-111111111111", "disabled": False}
+
+    monkeypatch.setattr("app.main.resolve_enabled_connection", fake_resolve_enabled_connection)
 
 
 async def _target_group(session) -> str:
