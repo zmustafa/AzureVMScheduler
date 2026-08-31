@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Mail, MessagesSquare, Slack, Ticket, Webhook, type LucideIcon } from 'lucide-react'
+import { Mail, MessageCircle, MessagesSquare, Ticket, Webhook, type LucideIcon } from 'lucide-react'
 import { api } from '../api'
 import { formatDuration, serverNow, useTick } from './time'
 import type { ConnectorsResponse, DeliveryStatus, Severity } from '../types'
@@ -57,7 +57,7 @@ export const PER_VM_EVENTS = new Set(['vm.start_failed', 'vm.start_timed_out', '
 export const CONNECTOR_ICONS: Record<string, LucideIcon> = {
   email: Mail,
   teams: MessagesSquare,
-  slack: Slack,
+  slack: MessageCircle,
   servicenow: Ticket,
   webhook: Webhook,
 }

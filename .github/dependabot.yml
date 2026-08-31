@@ -4,8 +4,26 @@ updates:
     directory: /frontend
     schedule:
       interval: weekly
+    groups:
+      frontend-dependencies:
+        patterns:
+          - "*"
+    ignore:
+      # These majors need coordinated migrations. TypeScript 7 is not yet accepted by
+      # typescript-eslint; Tailwind 4 replaces this project's PostCSS/config integration.
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+      - dependency-name: tailwindcss
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: pip
     directory: /backend
     schedule:
       interval: weekly
+    versioning-strategy: increase-if-necessary
+    groups:
+      backend-dependencies:
+        patterns:
+          - "*"

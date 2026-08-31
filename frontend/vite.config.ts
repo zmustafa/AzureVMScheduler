@@ -10,10 +10,19 @@ export default defineConfig(({ mode }) => {
       // chunks means a deploy invalidates the app chunk alone rather than the whole download.
       rollupOptions: {
         output: {
-          manualChunks: {
-            react: ['react', 'react-dom', 'react-router'],
-            query: ['@tanstack/react-query'],
-            icons: ['lucide-react'],
+          manualChunks(id) {
+            const moduleId = id.replaceAll('\\', '/')
+            if (moduleId.includes('/node_modules/react/') ||
+                moduleId.includes('/node_modules/react-dom/') ||
+                moduleId.includes('/node_modules/react-router/')) {
+              return 'react'
+            }
+            if (moduleId.includes('/node_modules/@tanstack/react-query/')) {
+              return 'query'
+            }
+            if (moduleId.includes('/node_modules/lucide-react/')) {
+              return 'icons'
+            }
           },
         },
       },
