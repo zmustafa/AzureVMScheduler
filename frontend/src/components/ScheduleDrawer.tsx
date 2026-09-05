@@ -174,7 +174,7 @@ export function ScheduleFields({ value, onChange, tree, lockTarget }: { value: S
       onChange={(next) => onChange({ ...value, ...next })}
     />
 
-    <Field label="Stagger between VMs (seconds)" hint={staggerHint(vmCount, Number(value.stagger_seconds) || 0)}>
+    <Field label="Stagger between VMs (seconds)" hint={staggerHint(vmCount, Number(value.stagger_seconds) || 0, value.action)}>
       <input type="number" autoComplete="off" min={0} max={3600} value={value.stagger_seconds} onChange={(event) => patch({ stagger_seconds: Number(event.target.value) })} />
     </Field>
 

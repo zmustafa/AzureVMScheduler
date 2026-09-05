@@ -75,7 +75,7 @@ function UsersTab() {
   const [editing, setEditing] = useState<AccessUser | 'new' | null>(null)
   const [removing, setRemoving] = useState<AccessUser | null>(null)
 
-  const after = () => { invalidate(keys.users); invalidate(keys.groups); setEditing(null); setRemoving(null) }
+  const after = () => { invalidate(keys.users); invalidate(keys.groups); setEditing(null); setRemoving(null); save.reset() }
   const save = useMutation({
     mutationFn: (input: { id?: string; body: unknown }) => input.id
       ? api<AccessUser>(`/access/users/${input.id}`, json('PATCH', input.body))
@@ -97,11 +97,12 @@ function UsersTab() {
     {error && <ErrorNotice error={error} />}
 
     {editing && <UserEditor
+      key={editing === 'new' ? 'new' : editing.id}
       user={editing === 'new' ? null : editing}
       roles={roles.data ?? []}
       groups={groups.data ?? []}
       busy={save.isPending}
-      onCancel={() => setEditing(null)}
+      onCancel={() => { setEditing(null); save.reset() }}
       onSave={(body) => save.mutate({ id: editing === 'new' ? undefined : editing.id, body })}
     />}
 
@@ -201,12 +202,13 @@ function UserEditor({ user, roles, groups, busy, onCancel, onSave }: {
 }
 
 /** Chip-style multi-select toggle used for roles, groups and permissions. */
-function Toggle({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+function Toggle({ active, onClick, children, disabled = false }: { active: boolean; onClick: () => void; children: ReactNode; disabled?: boolean }) {
   return <button
     type="button"
     aria-pressed={active}
+    disabled={disabled}
     onClick={onClick}
-    className={`rounded-full border px-3 py-1 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-azure ${active ? 'border-blue-500 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'}`}
+    className={`rounded-full border px-3 py-1 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-azure disabled:cursor-default ${active ? 'border-blue-500 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'}`}
   >{children}</button>
 }
 
@@ -244,6 +246,7 @@ function RolesTab() {
     {(roles.error || save.error || remove.error) && <ErrorNotice error={roles.error ?? save.error ?? remove.error} />}
 
     {editing && <RoleEditor
+      key={editing === 'new' ? 'new' : editing.id}
       role={editing === 'new' ? null : editing}
       sections={sections}
       busy={save.isPending}
@@ -309,6 +312,7 @@ function RoleEditor({ role, sections, busy, onCancel, onSave }: {
             {items.map((item) => <Toggle
               key={item.key}
               active={selected.includes(item.key)}
+              disabled={!!role?.is_system}
               onClick={() => !role?.is_system && setSelected(selected.includes(item.key) ? selected.filter((value) => value !== item.key) : [...selected, item.key])}
             >{item.label}</Toggle>)}
           </div>
@@ -353,6 +357,7 @@ function GroupsTab() {
     {(groups.error || save.error || remove.error) && <ErrorNotice error={groups.error ?? save.error ?? remove.error} />}
 
     {editing && <GroupEditor
+      key={editing === 'new' ? 'new' : editing.id}
       group={editing === 'new' ? null : editing}
       roles={roles.data ?? []}
       busy={save.isPending}
@@ -526,6 +531,7 @@ function SsoTab() {
     {(providers.error || save.error || remove.error) && <ErrorNotice error={providers.error ?? save.error ?? remove.error} />}
 
     {editing && <ProviderEditor
+      key={editing === 'new' ? 'new' : editing.id}
       provider={editing === 'new' ? null : editing}
       busy={save.isPending}
       onCancel={() => setEditing(null)}

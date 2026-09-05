@@ -68,14 +68,15 @@ function ChipSelect({ label, hint, options, selected, onToggle, renderLabel }: {
 /** Routing rules: which events reach which connectors, for which part of the hierarchy. */
 export function NotificationRulesPage() {
   const canManage = useCan('notifications.manage')
+  const canReadGroups = useCan('groups.read')
   const client = useQueryClient()
-  const groups = useGroupTree()
+  const groups = useGroupTree(canReadGroups)
   const [draft, setDraft] = useState<NotificationRuleInput | null>(null)
   const [removing, setRemoving] = useState<NotificationRule | null>(null)
 
   const query = useQuery({ queryKey: NOTIFICATION_RULES_KEY, queryFn: () => api<NotificationRulesResponse>('/notification-rules') })
   const rules = query.data?.rules ?? []
-  const connectors = query.data?.connectors ?? []
+  const connectors = useMemo(() => query.data?.connectors ?? [], [query.data?.connectors])
   const eventTypes = query.data?.event_types ?? []
   const refresh = () => client.invalidateQueries({ queryKey: NOTIFICATION_RULES_KEY })
 

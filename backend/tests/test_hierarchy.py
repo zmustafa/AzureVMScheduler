@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 from sqlalchemy import select
 
@@ -20,6 +22,7 @@ from app.hierarchy import (
 )
 from app.models import Group, Schedule, VirtualMachine, VmAttempt, new_id
 from app.scheduling import create_run, finalize_run_if_complete
+from test_runs import api_client
 
 
 VM_TEMPLATE = "/subscriptions/12345678-1234-1234-1234-123456789abc/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/{name}"
@@ -138,6 +141,45 @@ async def test_ensure_group_path_rejects_over_length_names(session) -> None:
     assert ring.name == "R" * MAX_GROUP_NAME
     application = await session.get(Group, ring.parent_id)
     assert application is not None and application.name == "A" * MAX_GROUP_NAME
+
+
+async def test_group_api_persists_stop_protection_on_create_and_update(session) -> None:
+    """The stop-safety flag must not be accepted by the schema and then silently discarded."""
+    async with api_client(session) as client:
+        created = await client.post("/api/groups", json={"name": "Protected", "never_stop": True})
+        assert created.status_code == 201, created.text
+        assert created.json()["never_stop"] is True
+
+        updated = await client.patch(f"/api/groups/{created.json()['id']}", json={"never_stop": False})
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["never_stop"] is False
+
+    stored = await session.get(Group, created.json()["id"])
+    assert stored is not None and stored.never_stop is False
+
+
+async def test_group_api_rejects_an_unknown_connection_override(session, monkeypatch) -> None:
+    monkeypatch.setattr("app.main.list_connections", AsyncMock(return_value=[]))
+    async with api_client(session) as client:
+        response = await client.post("/api/groups", json={"name": "Invalid", "azure_connection_id": "missing"})
+
+    assert response.status_code == 422
+    assert "does not exist" in response.text
+
+
+async def test_a_referenced_connection_cannot_be_deleted(session, monkeypatch) -> None:
+    connection_id = "connection-in-use"
+    await make_group(session, "Payments", azure_connection_id=connection_id)
+    remove = AsyncMock(return_value=True)
+    monkeypatch.setattr("app.main.list_connections", AsyncMock(return_value=[{"id": connection_id}]))
+    monkeypatch.setattr("app.main.delete_connection", remove)
+
+    async with api_client(session) as client:
+        response = await client.delete(f"/api/connections/{connection_id}")
+
+    assert response.status_code == 409
+    assert "1 group(s)" in response.text
+    remove.assert_not_awaited()
 
 
 async def test_sibling_names_are_unique_case_insensitively(session) -> None:

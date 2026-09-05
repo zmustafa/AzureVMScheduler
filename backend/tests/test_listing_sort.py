@@ -103,6 +103,26 @@ async def test_group_vm_listing_honours_sort_and_direction(session) -> None:
     assert [item["vm_name"] for item in descending.json()["items"]] == list(reversed(expected))
 
 
+async def test_group_vm_listing_filters_before_pagination(session) -> None:
+    """Group-page search must cover the whole subtree, not only the current browser page."""
+    await seed_export_estate(session)
+    async with api_client(session) as client:
+        searched = await client.get(
+            f"/api/groups/{GROUP_ID}/vms",
+            params={"recursive": "true", "q": "charlie", "limit": 1},
+        )
+        disabled = await client.get(
+            f"/api/groups/{GROUP_ID}/vms",
+            params={"recursive": "true", "enabled": "false", "limit": 1},
+        )
+
+    assert searched.status_code == disabled.status_code == 200
+    assert searched.json()["total"] == 1
+    assert [item["vm_name"] for item in searched.json()["items"]] == ["charlie-vm"]
+    assert disabled.json()["total"] == 1
+    assert [item["vm_name"] for item in disabled.json()["items"]] == ["charlie-vm"]
+
+
 # -- run sorting -------------------------------------------------------
 
 NEWEST_AT = datetime(2026, 7, 24, 10, 0, tzinfo=timezone.utc)

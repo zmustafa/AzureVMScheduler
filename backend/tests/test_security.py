@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select
 
 from app.connections import decrypt_value, encrypt_value
-from app.models import Group, LoginSession, Role, User, new_id
+from app.models import Group, LoginSession, Role, Schedule, ScheduleRun, User, VirtualMachine, VmAttempt, new_id
 from app.oidc import read_state, validate_return_url
 
 from test_access_control import seeded
@@ -202,6 +202,190 @@ async def test_a_role_named_admin_without_permissions_is_refused(session) -> Non
     async with signed_in(session, user) as client:
         assert (await client.put("/api/settings/general", json={"default_timezone": "UTC"})).status_code == 403
         assert (await client.put("/api/connections", json={"display_name": "x", "auth_method": "azure_cli"})).status_code == 403
+
+
+async def test_dashboard_endpoints_require_the_dashboard_capability(session) -> None:
+    custom = Role(id=new_id(), name="inventory-only", description="", is_system=False,
+                  permissions_json=["vms.read"])
+    session.add(custom)
+    await session.flush()
+    user = await make_login(session, "inventory-reader", custom)
+
+    async with signed_in(session, user) as client:
+        assert (await client.get("/api/dashboard")).status_code == 403
+        assert (await client.get("/api/overview")).status_code == 403
+
+
+@pytest.mark.parametrize("permission", ["groups.read", "vms.read", "schedules.read", "imports.write", "connections.manage"])
+async def test_features_that_need_public_connection_metadata_can_list_it(session, permission: str) -> None:
+    custom = Role(id=new_id(), name=f"only-{permission}", description="", is_system=False,
+                  permissions_json=[permission])
+    session.add(custom)
+    await session.flush()
+    user = await make_login(session, f"reader-{permission.replace('.', '-')}", custom)
+
+    async with signed_in(session, user) as client:
+        response = await client.get("/api/connections")
+
+    assert response.status_code == 200, response.text
+
+
+async def test_unrelated_capability_cannot_list_connection_metadata(session) -> None:
+    custom = Role(id=new_id(), name="notifications-only", description="", is_system=False,
+                  permissions_json=["notifications.read"])
+    session.add(custom)
+    await session.flush()
+    user = await make_login(session, "notification-reader", custom)
+
+    async with signed_in(session, user) as client:
+        response = await client.get("/api/connections")
+
+    assert response.status_code == 403
+
+
+async def test_group_read_does_not_disclose_vm_or_schedule_details(session) -> None:
+    group = Group(id=new_id(), name="Restricted", path="", depth=0)
+    group.path = f"/{group.id}/"
+    vm = VirtualMachine(
+        id=new_id(), group_id=group.id, vm_resource_id="/subscriptions/s/resourceGroups/r/providers/Microsoft.Compute/virtualMachines/secret-vm",
+        normalized_resource_id="/subscriptions/s/resourcegroups/r/providers/microsoft.compute/virtualmachines/secret-vm",
+        display_name="secret-vm", vm_name="secret-vm",
+    )
+    schedule = Schedule(id=new_id(), name="Secret wave", schedule_type="daily", start_time="07:00", timezone="UTC", target_type="group", target_id=group.id)
+    role = Role(id=new_id(), name="group-reader-only", description="", is_system=False, permissions_json=["groups.read"])
+    session.add_all([group, vm, schedule, role])
+    await session.commit()
+    reader = await make_login(session, "group-reader-only", role)
+
+    async with signed_in(session, reader) as client:
+        listed = await client.get("/api/groups")
+        detail = await client.get(f"/api/groups/{group.id}")
+
+    assert listed.status_code == detail.status_code == 200
+    assert listed.json()[0]["subtree_vm_count"] == 0
+    assert listed.json()[0]["subtree_schedule_count"] == 0
+    assert detail.json()["vms"] == []
+    assert detail.json()["schedules"] == []
+
+
+async def test_schedule_read_exposes_count_but_not_vm_or_run_details(session) -> None:
+    group = Group(id=new_id(), name="Restricted", path="", depth=0)
+    group.path = f"/{group.id}/"
+    vm = VirtualMachine(
+        id=new_id(), group_id=group.id, vm_resource_id="/subscriptions/s/resourceGroups/r/providers/Microsoft.Compute/virtualMachines/secret-vm",
+        normalized_resource_id="/subscriptions/s/resourcegroups/r/providers/microsoft.compute/virtualmachines/secret-vm",
+        display_name="secret-vm", vm_name="secret-vm",
+    )
+    schedule = Schedule(id=new_id(), name="Visible wave", schedule_type="daily", start_time="07:00", timezone="UTC", target_type="group", target_id=group.id)
+    run = ScheduleRun(id=new_id(), schedule_id=schedule.id, schedule_name=schedule.name)
+    attempt = VmAttempt(id=new_id(), schedule_id=schedule.id, run_id=run.id, vm_id=vm.id, vm_resource_id=vm.vm_resource_id)
+    role = Role(id=new_id(), name="schedule-reader-only", description="", is_system=False, permissions_json=["schedules.read"])
+    session.add_all([group, vm, schedule, run, attempt, role])
+    await session.commit()
+    reader = await make_login(session, "schedule-reader-only", role)
+
+    async with signed_in(session, reader) as client:
+        response = await client.get(f"/api/schedules/{schedule.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schedule"]["vm_count"] == 1
+    assert body["vms"] == []
+    assert body["attempts"] == []
+    assert body["runs"] == []
+
+
+async def test_group_writer_cannot_cascade_delete_hidden_vms_or_schedules(session) -> None:
+    group = Group(id=new_id(), name="Protected", path="", depth=0)
+    group.path = f"/{group.id}/"
+    vm = VirtualMachine(
+        id=new_id(), group_id=group.id, vm_resource_id="/subscriptions/s/resourceGroups/r/providers/Microsoft.Compute/virtualMachines/vm",
+        normalized_resource_id="/subscriptions/s/resourcegroups/r/providers/microsoft.compute/virtualmachines/vm", vm_name="vm",
+    )
+    schedule = Schedule(id=new_id(), name="Protected wave", schedule_type="daily", start_time="07:00", timezone="UTC", target_type="group", target_id=group.id)
+    role = Role(id=new_id(), name="group-writer-only", description="", is_system=False, permissions_json=["groups.read", "groups.write"])
+    session.add_all([group, vm, schedule, role])
+    await session.commit()
+    writer = await make_login(session, "group-writer-only", role)
+
+    async with signed_in(session, writer) as client:
+        response = await client.delete(f"/api/groups/{group.id}")
+
+    assert response.status_code == 403
+    assert "vms.write" in response.text
+    assert await session.get(Group, group.id) is not None
+
+
+async def test_vm_writer_cannot_delete_a_direct_schedule(session) -> None:
+    group = Group(id=new_id(), name="Protected", path="", depth=0)
+    group.path = f"/{group.id}/"
+    vm = VirtualMachine(
+        id=new_id(), group_id=group.id, vm_resource_id="/subscriptions/s/resourceGroups/r/providers/Microsoft.Compute/virtualMachines/vm",
+        normalized_resource_id="/subscriptions/s/resourcegroups/r/providers/microsoft.compute/virtualmachines/vm", vm_name="vm",
+    )
+    schedule = Schedule(id=new_id(), name="Protected wave", schedule_type="daily", start_time="07:00", timezone="UTC", target_type="vm", target_id=vm.id)
+    role = Role(id=new_id(), name="vm-writer-only", description="", is_system=False, permissions_json=["vms.read", "vms.write"])
+    session.add_all([group, vm, schedule, role])
+    await session.commit()
+    writer = await make_login(session, "vm-writer-only", role)
+
+    async with signed_in(session, writer) as client:
+        response = await client.delete(f"/api/vms/{vm.id}")
+
+    assert response.status_code == 403
+    assert "schedules.write" in response.text
+    assert await session.get(VirtualMachine, vm.id) is not None
+
+
+async def test_connection_discovery_is_a_csrf_protected_post(session, monkeypatch) -> None:
+    roles = await seeded(session)
+    admin = await make_login(session, "discovery-admin", roles["admin"])
+
+    async def fake_discovery(connection_id, action, user, db):
+        return {"ok": True, "subscriptions": [], "connection_id": connection_id, "action": action}
+
+    monkeypatch.setattr("app.main.connection_live_action", fake_discovery)
+    async with signed_in(session, admin) as client:
+        get_response = await client.get("/api/connections/connection-1/discover")
+        post_response = await client.post("/api/connections/connection-1/discover")
+
+    assert get_response.status_code == 405
+    assert post_response.status_code == 200
+    assert post_response.json()["action"] == "discovered"
+
+
+async def test_live_vm_discovery_is_not_a_side_effectful_get(session) -> None:
+    roles = await seeded(session)
+    user = await make_login(session, "vm-discovery-user", roles["viewer"])
+
+    async with signed_in(session, user) as client:
+        response = await client.get(
+            "/api/connections/connection-1/vms",
+            params={"subscription_id": "12345678-1234-1234-1234-123456789abc"},
+        )
+
+    assert response.status_code == 405
+
+
+async def test_login_response_contains_current_custom_role_permissions(session) -> None:
+    role = Role(id=new_id(), name="dashboard-login", description="", is_system=False, permissions_json=["dashboard.read"])
+    session.add(role)
+    await session.flush()
+    user = await make_login(session, "dashboard-login", role)
+
+    from app.database import get_db
+    from app.main import app
+    import httpx
+
+    app.dependency_overrides[get_db] = lambda: session
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            response = await client.post("/api/auth/login", json={"username": user.username, "password": _PASSWORD})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["user"]["permissions"] == ["dashboard.read"]
 
 
 # -- off-boarding --------------------------------------------------------

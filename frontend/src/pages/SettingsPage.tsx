@@ -13,14 +13,14 @@ import type { BackupSection, DashboardData, DemoDataResult, DemoDataStatus, Esta
 type Policy = {local_login_enabled:boolean;min_length:number;require_upper:boolean;require_lower:boolean;require_number:boolean;require_symbol:boolean;lockout_attempts:number;lockout_minutes:number;session_idle_minutes:number;session_absolute_hours:number;schedule_missed_grace_seconds:number}
 type Settings = { app_name:string; environment:string; real_azure_starts_enabled:boolean; real_azure_stops_enabled:boolean; default_timezone:string; password_policy:Policy }
 export function SettingsPage() {
-  const query=useQuery({queryKey:['settings'],queryFn:()=>api<Settings>('/settings/general')}); const {user,refresh}=useAuth(); const [message,setMessage]=useState('')
+  const query=useQuery({queryKey:['settings'],queryFn:()=>api<Settings>('/settings/general')}); const {refresh}=useAuth(); const canWriteSettings=useCan('settings.write'); const [message,setMessage]=useState('')
   const change=useMutation({mutationFn:(body:unknown)=>api('/auth/change-password',json('POST',body)),onSuccess:()=>{setMessage('Password updated.');void refresh()}})
   const submit=(event:FormEvent<HTMLFormElement>)=>{event.preventDefault();setMessage('');const form=new FormData(event.currentTarget);if(form.get('new_password')!==form.get('confirm')){setMessage('New passwords do not match.');return}change.mutate({current_password:form.get('current_password'),new_password:form.get('new_password')})}
     if(query.isLoading)return <Loading/>;if(query.error)return <ErrorNotice error={query.error}/>;const settings=query.data!
     return <><PageHeader title="Settings" description="Authentication, account security, and local application safety."/>
       <div className="grid gap-6 lg:grid-cols-2"><section className="card"><div className="flex items-center gap-3"><ShieldCheck className="text-blue-700"/><div><h2 className="font-semibold">General</h2><p className="muted">Runtime safety posture</p></div></div><dl className="mt-6 space-y-4 text-sm"><Row name="Application" value={settings.app_name}/><Row name="Environment" value={settings.environment}/><Row name="Global real starts" value={settings.real_azure_starts_enabled?'Enabled':'Disabled (mock mode)'}/><Row name="Global real stops" value={settings.real_azure_stops_enabled?'Enabled':'Disabled (mock mode)'}/></dl><div className={`mt-5 rounded-lg border p-3 text-sm ${settings.real_azure_starts_enabled||settings.real_azure_stops_enabled?'border-amber-200 bg-amber-50 text-amber-900':'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>{settings.real_azure_starts_enabled||settings.real_azure_stops_enabled?'Starts and stops are gated separately — each also needs an enabled, writable tenant that permits that action.':'All scheduler executions use the deterministic mock adapter.'}</div></section>
       <section className="card"><div className="flex items-center gap-3"><KeyRound className="text-blue-700"/><div><h2 className="font-semibold">Change password</h2><p className="muted">At least {settings.password_policy.min_length} characters.</p></div></div><form className="mt-6 space-y-4" autoComplete="off" onSubmit={submit}>{change.error&&<ErrorNotice error={change.error}/>} {message&&<p className={`rounded-lg border p-3 text-sm ${message.includes('updated')?'border-emerald-200 bg-emerald-50 text-emerald-800':'border-rose-200 bg-rose-50 text-rose-800'}`}>{message}</p>}<Field label="Current password"><input name="current_password" type="password" autoComplete="new-password" required/></Field><Field label="New password"><input name="new_password" type="password" autoComplete="new-password" required/></Field><Field label="Confirm new password"><input name="confirm" type="password" autoComplete="new-password" required/></Field><button className="btn-primary" disabled={change.isPending}>Update password</button></form></section></div>
-    <div className="mt-6 grid gap-6 lg:grid-cols-2"><DefaultTimezoneCard current={settings.default_timezone} canEdit={user?.role==='admin'}/><SchedulerTuningCard/></div>
+    <div className="mt-6 grid gap-6 lg:grid-cols-2"><DefaultTimezoneCard current={settings.default_timezone} canEdit={canWriteSettings}/><SchedulerTuningCard/></div>
     <BackupAndRestore/>
     <DemoDataCard/>
     <DangerZone/>
@@ -104,7 +104,7 @@ async function downloadExport(){
 
 /** Export the portable settings document and restore one, in merge or replace mode, behind a preview. */
 function BackupAndRestore(){
-  const isAdmin=useCan('*')
+  const canManage=useCan('backup.manage')
   const client=useQueryClient()
   const [open,setOpen]=useState(false)
   const [document_,setDocument]=useState<SettingsDocument|null>(null)
@@ -121,7 +121,7 @@ function BackupAndRestore(){
     mutationFn:()=>api<SettingsImportSummary>('/admin/import',json('POST',{document:document_,mode,sections})),
     onSuccess:(data)=>{setResult(data);setPreview(null);['groups','vms','schedules','dashboard','connections','connectors','notification-rules','admin-auth','settings'].forEach((key)=>void client.invalidateQueries({queryKey:[key]}))},
   })
-  if(!isAdmin) return null
+  if(!canManage) return null
   const reset=()=>{setDocument(null);setFilename('');setParseError('');setPreview(null);setResult(null);previewImport.reset();runImport.reset()}
   const pickFile=async(file:File|undefined)=>{
     reset()
@@ -270,17 +270,18 @@ function DemoDataCard(){
 
 /** Irreversible removal of the whole schedulable estate. Identity, audit and credentials survive. */
 function DangerZone(){
-  const isAdmin=useCan('*')
+  const canManage=useCan('backup.manage')
+  const canReadDashboard=useCan('dashboard.read')
   const client=useQueryClient()
   const [open,setOpen]=useState(false)
   const [typed,setTyped]=useState('')
   const [removed,setRemoved]=useState<EstateResetResult|null>(null)
-  const dashboard=useQuery({queryKey:['dashboard'],queryFn:()=>api<DashboardData>('/dashboard'),enabled:isAdmin})
+  const dashboard=useQuery({queryKey:['dashboard'],queryFn:()=>api<DashboardData>('/dashboard'),enabled:canManage&&canReadDashboard})
   const reset=useMutation({
     mutationFn:()=>api<EstateResetResult>('/admin/reset-estate',json('POST',{confirm:'DELETE'})),
     onSuccess:(data)=>{setRemoved(data);setOpen(false);setTyped('');['groups','vms','schedules','dashboard','runs','timeline'].forEach((key)=>void client.invalidateQueries({queryKey:[key]}))},
   })
-  if(!isAdmin) return null
+  if(!canManage) return null
   const counts=dashboard.data
   return <section className="card mt-6 border-rose-300 bg-rose-50/30">
     <Title icon={<AlertTriangle className="text-rose-600"/>} title="Danger zone" subtitle="Irreversible removal of the whole estate"/>

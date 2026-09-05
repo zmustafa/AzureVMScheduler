@@ -254,8 +254,8 @@ export function ConnectorsPage() {
   const [notice, setNotice] = useState<{ tone: 'ok' | 'bad'; text: string } | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
 
-  const types = catalog.data?.types ?? []
-  const connectors = catalog.data?.connectors ?? []
+  const types = useMemo(() => catalog.data?.types ?? [], [catalog.data?.types])
+  const connectors = useMemo(() => catalog.data?.connectors ?? [], [catalog.data?.connectors])
   const typeById = useMemo(() => new Map(types.map((item) => [item.id, item])), [types])
   const refresh = () => client.invalidateQueries({ queryKey: CONNECTORS_KEY })
 

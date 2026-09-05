@@ -13,7 +13,7 @@ const TONE = {
  * Pre-flight problems that would make the next wave fail or silently do nothing.
  * Collapses to a single green line when the estate is ready, so a healthy dashboard stays quiet.
  */
-export function ReadinessStrip({ checks, loading }: { checks: ReadinessCheck[]; loading?: boolean }) {
+export function ReadinessStrip({ checks, loading, canOpen }: { checks: ReadinessCheck[]; loading?: boolean; canOpen?: (link: string) => boolean }) {
   const [open, setOpen] = useState(true)
   const errors = checks.filter((item) => item.severity === 'error').length
   const warnings = checks.filter((item) => item.severity === 'warning').length
@@ -51,7 +51,7 @@ export function ReadinessStrip({ checks, loading }: { checks: ReadinessCheck[]; 
             <p className={`text-sm font-semibold ${tone.text}`}>{check.title}</p>
             <p className="text-xs text-slate-600">{check.detail}</p>
           </div>
-          <Link className="btn-secondary !py-1 text-xs" to={check.link}>Fix</Link>
+          {(!canOpen || canOpen(check.link)) && <Link className="btn-secondary !py-1 text-xs" to={check.link}>Fix</Link>}
         </li>
       })}
     </ul>}

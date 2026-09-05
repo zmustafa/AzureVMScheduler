@@ -180,6 +180,30 @@ async def test_activity_feed_maps_attempt_severity_and_carries_schedule_name(ses
     assert [event["severity"] for event in waves] == ["warning", "info"]
 
 
+async def test_activity_feed_describes_stop_waves_and_attempts_as_stops(session) -> None:
+    run = await make_run(
+        session, "33333333-3333-3333-3333-333333333333", "Evening stop", INSIDE_AT,
+        finished_at=INSIDE_AT + timedelta(minutes=1), status="succeeded", action="stop",
+        total_count=1, succeeded_count=1,
+    )
+    attempt = await make_attempt(
+        session, "cccccccc-0000-0000-0000-000000000001", run, "vm-alpha",
+        "succeeded", INSIDE_AT + timedelta(seconds=30), 0,
+    )
+    attempt.action = "stop"
+    await session.commit()
+
+    async with api_client(session) as client:
+        response = await client.get("/api/runs/activity", params=WINDOW)
+
+    events = response.json()["events"]
+    assert next(item for item in events if item["id"] == f"run:{run.id}:started")["summary"] == "Began a scheduler stop wave covering 1 virtual machine."
+    assert next(item for item in events if item["id"] == f"run:{run.id}:finished")["summary"] == "Wave succeeded — 1 stopped, 0 failed, 0 skipped."
+    attempt_event = next(item for item in events if item["id"] == f"attempt:{attempt.id}")
+    assert attempt_event["kind"] == "Stop attempt"
+    assert attempt_event["summary"] == "Stop attempt succeeded."
+
+
 async def test_activity_feed_truncates_to_the_requested_limit(session) -> None:
     await seed_activity(session)
     async with api_client(session) as client:

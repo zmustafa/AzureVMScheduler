@@ -5,6 +5,8 @@ import { ArrowDown, ArrowUp, CalendarClock, ChevronRight, CornerUpRight, FolderT
 import { api, json } from '../api'
 import { useCan } from '../auth'
 import { connectionLabel, findGroup, subtreeIds, useGroupTree, useLatestRuns, useScheduleIndex } from '../lib/queries'
+import { actionMeta, actionSentence } from '../lib/actions'
+import { recurrenceSummary } from '../lib/recurrence'
 import { useCountdown, zoneLabel } from '../lib/time'
 import { GroupEditorDrawer, MoveGroupDrawer } from '../components/GroupForms'
 import { ScheduleDrawer } from '../components/ScheduleDrawer'
@@ -15,7 +17,7 @@ import { Chip, EmptyState, ErrorNotice, Loading, PageHeader, Toggle } from '../c
 import type { Group, GroupDetail, GroupNode, Schedule, ScheduleRun } from '../types'
 
 function scheduleChipText(schedule: Schedule): string {
-  const cadence = schedule.schedule_type === 'daily' ? `Daily ${schedule.start_time}` : `Once ${schedule.start_time}`
+  const cadence = recurrenceSummary(schedule)
   const stagger = schedule.stagger_seconds > 0 ? ` · stagger ${schedule.stagger_seconds}s` : ' · no stagger'
   return `${cadence} ${zoneLabel(schedule.timezone, schedule.next_run_at)}${stagger}`
 }
@@ -23,16 +25,20 @@ function scheduleChipText(schedule: Schedule): string {
 function Countdown({ schedules }: { schedules: Schedule[] }) {
   const next = schedules.filter((item) => item.enabled && item.next_run_at).sort((a, b) => String(a.next_run_at).localeCompare(String(b.next_run_at)))[0]
   const text = useCountdown(next?.next_run_at ?? null, next?.timezone)
-  return <Chip tone={next ? 'info' : 'neutral'} icon={<CalendarClock size={13} />} title={next ? `${next.name} (${next.timezone})` : 'No enabled schedule resolves to this node'}>{next ? text : 'No upcoming start'}</Chip>
+  return <Chip tone={next ? 'info' : 'neutral'} icon={<CalendarClock size={13} />} title={next ? `${next.name} (${next.timezone})` : 'No enabled schedule resolves to this node'}>{next ? text : 'No upcoming wave'}</Chip>
 }
 
-function RingCard({ node, schedules, lastRun, index, total, canWrite, onReorder, onRunNow, onEditSchedule, onNewSchedule }: {
+function RingCard({ node, schedules, lastRun, index, total, canWriteGroup, canWriteSchedules, canReadSchedules, canReadRuns, canReadVms, onReorder, onRunNow, onEditSchedule, onNewSchedule }: {
   node: GroupNode
   schedules: Schedule[]
   lastRun?: ScheduleRun
   index: number
   total: number
-  canWrite: boolean
+  canWriteGroup: boolean
+  canWriteSchedules: boolean
+  canReadSchedules: boolean
+  canReadRuns: boolean
+  canReadVms: boolean
   onReorder: (from: number, to: number) => void
   onRunNow: (schedule: Schedule, node: GroupNode) => void
   onEditSchedule: (schedule: Schedule) => void
@@ -56,19 +62,19 @@ function RingCard({ node, schedules, lastRun, index, total, canWrite, onReorder,
           <span className="truncate">{node.name}</span>
         </Link>
       </div>
-      {canWrite && <div className="flex shrink-0 items-center gap-1">
+      {canWriteGroup && <div className="flex shrink-0 items-center gap-1">
         <button type="button" className="btn-secondary !px-1.5 !py-1" aria-label={`Move ${node.name} earlier`} disabled={index === 0} onClick={() => onReorder(index, index - 1)}><ArrowUp size={14} /></button>
         <button type="button" className="btn-secondary !px-1.5 !py-1" aria-label={`Move ${node.name} later`} disabled={index === total - 1} onClick={() => onReorder(index, index + 1)}><ArrowDown size={14} /></button>
       </div>}
     </div>
 
     <div className="flex flex-wrap items-center gap-2">
-      {primary
+      {canReadSchedules && (primary
         ? <Chip tone="info" icon={<CalendarClock size={13} />}>{scheduleChipText(primary)}</Chip>
-        : <Chip tone="warn" icon={<CalendarClock size={13} />}>No schedule</Chip>}
-      <Chip tone="neutral" icon={<Server size={13} />}>{node.subtree_vm_count} VM{node.subtree_vm_count === 1 ? '' : 's'}</Chip>
-      <Countdown schedules={schedules} />
-      {lastRun ? <Chip tone={lastRun.status === 'succeeded' ? 'success' : lastRun.status === 'running' ? 'warn' : 'danger'}>Last run: {lastRun.status.replaceAll('_', ' ')}</Chip> : <Chip tone="neutral">Never run</Chip>}
+        : <Chip tone="warn" icon={<CalendarClock size={13} />}>No schedule</Chip>)}
+      {canReadVms && <Chip tone="neutral" icon={<Server size={13} />}>{node.subtree_vm_count} VM{node.subtree_vm_count === 1 ? '' : 's'}</Chip>}
+      {canReadSchedules && <Countdown schedules={schedules} />}
+      {canReadRuns && (lastRun ? <Chip tone={lastRun.status === 'succeeded' ? 'success' : lastRun.status === 'running' ? 'warn' : 'danger'}>Last run: {lastRun.status.replaceAll('_', ' ')}</Chip> : <Chip tone="neutral">Never run</Chip>)}
       <Chip tone={enabled ? 'success' : 'neutral'}>{enabled ? 'Enabled' : 'Disabled'}</Chip>
       {(node.children?.length ?? 0) > 0 && <Chip tone="neutral">{node.children.length} nested ring{node.children.length === 1 ? '' : 's'}</Chip>}
     </div>
@@ -77,11 +83,11 @@ function RingCard({ node, schedules, lastRun, index, total, canWrite, onReorder,
 
     <div className="mt-auto flex flex-wrap items-center gap-2">
       <Link className="btn-secondary !py-1" to={`/applications/${node.id}`}>Open<ChevronRight size={14} /></Link>
-      {canWrite && (primary
+      {canWriteSchedules && (primary
         ? <button type="button" className="btn-secondary !py-1" onClick={() => onEditSchedule(primary)}><Pencil size={14} />Edit schedule</button>
         : <button type="button" className="btn-secondary !py-1" onClick={() => onNewSchedule(node)}><Plus size={14} />Add schedule</button>)}
-      {canWrite && primary && <button type="button" className="btn-secondary !py-1" onClick={() => onRunNow(primary, node)}><Play size={14} />Run now</button>}
-      {canWrite && <Toggle checked={enabled} busy={toggle.isPending} label={`${enabled ? 'Disable' : 'Enable'} ${node.name}`} onChange={(next) => { setOptimistic(next); toggle.mutate(next) }} />}
+      {canWriteSchedules && primary && <button type="button" className="btn-secondary !py-1" onClick={() => onRunNow(primary, node)}><Play size={14} />Run now</button>}
+      {canWriteGroup && <Toggle checked={enabled} busy={toggle.isPending} label={`${enabled ? 'Disable' : 'Enable'} ${node.name}`} onChange={(next) => { setOptimistic(next); toggle.mutate(next) }} />}
     </div>
   </article>
 }
@@ -93,16 +99,25 @@ export function GroupDetailPage() {
   const client = useQueryClient()
   const canWriteGroups = useCan('groups.write')
   const canRunSchedules = useCan('schedules.write')
+  const canReadSchedules = useCan('schedules.read')
+  const canReadRuns = useCan('runs.read')
+  const canReadVms = useCan('vms.read')
+  const canWriteVms = useCan('vms.write')
+  const [deleting, setDeleting] = useState(false)
 
-  const detail = useQuery({ queryKey: ['group', groupId], queryFn: () => api<GroupDetail>(`/groups/${groupId}`), enabled: !!groupId })
+  const detail = useQuery({
+    queryKey: ['group', groupId],
+    queryFn: () => api<GroupDetail>(`/groups/${groupId}`),
+    // Opening the destructive confirmation disables refetches before DELETE can remove the row.
+    enabled: !!groupId && !deleting,
+  })
   const tree = useGroupTree()
-  const schedules = useScheduleIndex()
-  const runs = useLatestRuns()
+  const schedules = useScheduleIndex(canReadSchedules)
+  const runs = useLatestRuns(canReadRuns)
 
   const [editing, setEditing] = useState(false)
   const [creatingRing, setCreatingRing] = useState(false)
   const [moving, setMoving] = useState(false)
-  const [deleting, setDeleting] = useState(false)
   const [scheduleTarget, setScheduleTarget] = useState<{ schedule?: Schedule; node?: GroupNode } | null>(null)
   const [runTarget, setRunTarget] = useState<{ schedule: Schedule; node: GroupNode | Group; vmCount: number } | null>(null)
 
@@ -126,7 +141,18 @@ export function GroupDetailPage() {
 
   const toggleGroup = useMutation({ mutationFn: (enabled: boolean) => api<Group>(`/groups/${groupId}`, json('PATCH', { enabled })), onSuccess: invalidateAll })
   const reorder = useMutation({ mutationFn: (orderedIds: string[]) => api('/groups/reorder', json('POST', { parent_id: groupId, ordered_ids: orderedIds })), onSuccess: invalidateAll })
-  const remove = useMutation({ mutationFn: () => api(`/groups/${groupId}`, json('DELETE')), onSuccess: () => { invalidateAll(); navigate('/applications') } })
+  const remove = useMutation({
+    mutationFn: () => api(`/groups/${groupId}`, json('DELETE')),
+    onSuccess: () => {
+      // Leave the detail route before invalidating; otherwise its still-mounted query refetches
+      // the group we just deleted and emits a distracting, expected 404.
+      client.removeQueries({ queryKey: ['group', groupId] })
+      navigate('/applications')
+      void client.invalidateQueries({ queryKey: ['groups'] })
+      void client.invalidateQueries({ queryKey: ['schedules'] })
+      void client.invalidateQueries({ queryKey: ['runs'] })
+    },
+  })
   const runNow = useMutation({ mutationFn: (scheduleId: string) => api<ScheduleRun | null>(`/schedules/${scheduleId}/run`, json('POST')), onSuccess: () => { invalidateAll(); setRunTarget(null) } })
 
   if (detail.isLoading || tree.isLoading) return <Loading />
@@ -138,6 +164,10 @@ export function GroupDetailPage() {
   const ownVmCount = detail.data.vms.length
   const subtreeVmCount = node?.subtree_vm_count ?? ownVmCount
   const primarySchedule = ownSchedules.find((item) => item.enabled) ?? ownSchedules[0]
+  const subtreeScheduleCount = node?.subtree_schedule_count ?? ownSchedules.length
+  const canDeleteGroup = canWriteGroups && canReadVms && canReadSchedules
+    && (subtreeVmCount === 0 || canWriteVms)
+    && (subtreeScheduleCount === 0 || canRunSchedules)
 
   const handleReorder = (from: number, to: number) => {
     const ordered = children.map((item) => item.id)
@@ -161,15 +191,15 @@ export function GroupDetailPage() {
         {canRunSchedules && primarySchedule && <button type="button" className="btn-primary" onClick={() => setRunTarget({ schedule: primarySchedule, node: group, vmCount: subtreeVmCount })}><Play size={15} />Run now</button>}
         {canWriteGroups && <button type="button" className="btn-secondary" onClick={() => setEditing(true)}><Pencil size={15} />Edit</button>}
         {canWriteGroups && <button type="button" className="btn-secondary" onClick={() => setMoving(true)}><CornerUpRight size={15} />Move</button>}
-        {canWriteGroups && <button type="button" className="btn-danger" onClick={() => setDeleting(true)}><Trash2 size={15} />Delete</button>}
+        {canDeleteGroup && <button type="button" className="btn-danger" onClick={() => setDeleting(true)}><Trash2 size={15} />Delete</button>}
       </div>}
     />
 
     {(runNow.error || reorder.error || toggleGroup.error) && <div className="mb-4"><ErrorNotice error={runNow.error ?? reorder.error ?? toggleGroup.error} /></div>}
 
     <section className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      <div className="card"><p className="muted">Aggregate next start</p><div className="mt-2"><Countdown schedules={subtreeSchedules} /></div></div>
-      <div className="card"><p className="muted">Virtual machines</p><p className="mt-2 text-2xl font-semibold text-slate-900">{subtreeVmCount}</p><p className="text-xs text-slate-500">{ownVmCount} directly in this {group.kind}</p></div>
+      <div className="card"><p className="muted">Aggregate next wave</p><div className="mt-2"><Countdown schedules={subtreeSchedules} /></div></div>
+      {canReadVms && <div className="card"><p className="muted">Virtual machines</p><p className="mt-2 text-2xl font-semibold text-slate-900">{subtreeVmCount}</p><p className="text-xs text-slate-500">{ownVmCount} directly in this {group.kind}</p></div>}
       <div className="card"><p className="muted">Rings</p><p className="mt-2 text-2xl font-semibold text-slate-900">{isApplication ? children.length : '—'}</p><p className="text-xs text-slate-500">{isApplication ? 'Directly in this application' : 'Rings hold virtual machines, not other rings'}</p></div>
       <div className="card"><p className="muted">Tenant</p><p className="mt-2 truncate text-sm font-medium text-slate-800">{connectionLabel(group.effective_connection_name ?? group.connection_name, group.effective_connection_tenant_id ?? group.connection_tenant_id)}</p><div className="mt-2 flex gap-2">{group.connection_inherited && <Chip tone="neutral">Inherited</Chip>}<Chip tone={group.enabled ? 'success' : 'neutral'}>{group.enabled ? 'Enabled' : 'Disabled'}</Chip>{!group.effective_enabled && <Chip tone="warn">Ancestor disabled</Chip>}</div></div>
     </section>
@@ -195,7 +225,11 @@ export function GroupDetailPage() {
             lastRun={primary ? runs.data?.get(primary.id) : undefined}
             index={index}
             total={children.length}
-            canWrite={canWriteGroups}
+            canWriteGroup={canWriteGroups}
+            canWriteSchedules={canRunSchedules && canReadSchedules}
+            canReadSchedules={canReadSchedules}
+            canReadRuns={canReadRuns}
+            canReadVms={canReadVms}
             onReorder={handleReorder}
             onRunNow={(schedule, target) => setRunTarget({ schedule, node: target, vmCount: target.subtree_vm_count })}
             onEditSchedule={(schedule) => setScheduleTarget({ schedule })}
@@ -205,7 +239,7 @@ export function GroupDetailPage() {
       </div>}
     </section>}
 
-    <section className="mb-8 space-y-3">
+    {canReadSchedules && <section className="mb-8 space-y-3">
       <h2 className="text-lg font-semibold text-slate-900">Schedules on this {group.kind}</h2>
       {ownSchedules.length === 0 ? <p className="muted">No schedule targets this node directly. Virtual machines inherit the nearest ancestor schedule.</p> : <ul className="grid gap-3 md:grid-cols-2">
         {ownSchedules.map((schedule) => <li key={schedule.id} className="card flex flex-wrap items-center justify-between gap-3">
@@ -217,9 +251,9 @@ export function GroupDetailPage() {
         </li>)}
       </ul>}
       {canRunSchedules && <button type="button" className="btn-secondary" onClick={() => setScheduleTarget({ node: node ?? undefined })}><Plus size={15} />New schedule for this {group.kind}</button>}
-    </section>
+    </section>}
 
-    <VmTable groupId={group.id} groupName={group.name} canHaveRings={isApplication} title={`Virtual machines in ${group.name}`} description={isApplication ? 'Direct members by default; include rings to see every VM in the application.' : 'Every virtual machine in this ring.'} />
+    {canReadVms && <VmTable groupId={group.id} groupName={group.name} canHaveRings={isApplication} title={`Virtual machines in ${group.name}`} description={isApplication ? 'Direct members by default; include rings to see every VM in the application.' : 'Every virtual machine in this ring.'} />}
 
     <GroupEditorDrawer open={editing} onClose={() => setEditing(false)} group={group} />
     <GroupEditorDrawer open={creatingRing} onClose={() => setCreatingRing(false)} parentId={group.id} parentName={group.name_path} />
@@ -234,8 +268,8 @@ export function GroupDetailPage() {
       <p>This removes <strong>{group.name_path}</strong>, every ring beneath it, <strong>{subtreeVmCount}</strong> virtual machine{subtreeVmCount === 1 ? '' : 's'} and their schedules.</p>
       <p className="mt-2">Tenant: <strong>{connectionLabel(group.connection_name, group.connection_tenant_id)}</strong>. This cannot be undone.</p>
     </ConfirmDialog>
-    <ConfirmDialog open={runTarget !== null} tone="primary" title="Start virtual machines now" confirmLabel="Run now" busy={runNow.isPending} onCancel={() => setRunTarget(null)} onConfirm={() => runTarget && runNow.mutate(runTarget.schedule.id)}>
-      <p>Schedule <strong>{runTarget?.schedule.name}</strong> will start <strong>{runTarget?.vmCount ?? 0}</strong> virtual machine{(runTarget?.vmCount ?? 0) === 1 ? '' : 's'} in <strong>{runTarget?.node.name_path}</strong>.</p>
+    <ConfirmDialog open={runTarget !== null} tone={runTarget?.schedule.action === 'stop' ? 'danger' : 'primary'} title={`${actionMeta(runTarget?.schedule.action).label} virtual machines now`} confirmLabel="Run now" busy={runNow.isPending} onCancel={() => setRunTarget(null)} onConfirm={() => runTarget && runNow.mutate(runTarget.schedule.id)}>
+      <p>Schedule <strong>{runTarget?.schedule.name}</strong> will {actionSentence(runTarget?.schedule.action ?? 'start', runTarget?.schedule.stop_mode ?? 'deallocate', runTarget?.vmCount ?? 0)} in <strong>{runTarget?.node.name_path}</strong>.</p>
       <p className="mt-2">Tenant: <strong>{connectionLabel(runTarget?.schedule.connection_name, runTarget?.schedule.connection_tenant_id)}</strong>.</p>
     </ConfirmDialog>
   </>

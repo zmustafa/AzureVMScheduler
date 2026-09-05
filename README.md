@@ -801,7 +801,8 @@ already present in the inventory.
 ## 🔔 Connectors & notifications
 
 Every published event lands in the in-app feed first, so nothing is lost even when no routing rule
-exists. Rules then decide what leaves the box.
+exists. Read/unread state is tracked per account, so one viewer cannot clear another viewer's badge.
+Rules then decide what leaves the box.
 
 **Events:** `run.succeeded`, `run.partially_failed`, `run.failed`, `run.timed_out`, `vm.start_failed`,
 `vm.start_timed_out`, `vm.start_skipped`, `schedule.missed` (critical, emitted exactly once per

@@ -40,7 +40,7 @@ from .auth import (
     verify_dummy_password,
     verify_password,
 )
-from .access import cached_permissions
+from .access import cache_permissions, cached_permissions, effective_permissions
 from .access_routes import router as access_router
 from .audit import audit
 from .azure import discover, list_virtual_machines, read_power_states, resolve_vm_names
@@ -78,8 +78,8 @@ from .hierarchy import (
     resolve_schedule_vms,
     resolve_schedule_vms_bulk,
 )
-from .models import AuditLog, Group, IdentityProvider, ImportBatch, LoginSession, NotificationDelivery, NotificationEvent, NotificationRule, Schedule, ScheduleRun, SecurityPolicy, User, VirtualMachine, VmAttempt, aware as _aware, new_id, utcnow
-from .notifications import EVENT_TYPES, publish, unread_count
+from .models import AuditLog, Group, IdentityProvider, ImportBatch, LoginSession, NotificationDelivery, NotificationEvent, NotificationEventRead, NotificationRule, Schedule, ScheduleRun, SecurityPolicy, User, VirtualMachine, VmAttempt, aware as _aware, new_id, utcnow
+from .notifications import EVENT_TYPES, mark_events_read, publish, read_event_ids, read_receipt_exists, unread_count
 from .overview import build_overview
 from . import firewall, ip_lockout, oidc, saml
 from .oidc import validate_return_url
@@ -115,6 +115,7 @@ from .schemas import (
     UserUpdate,
     VmBulkAction,
     VmBulkAdd,
+    VmDiscoveryInput,
     VmLookupInput,
     VmPowerActionInput,
     VmPowerScanInput,
@@ -248,6 +249,15 @@ def connection_fields(labels: dict[str, dict[str, Any]], connection_id: str | No
     if not found:
         return {"connection_name": "Unknown connection", "connection_tenant_id": None}
     return {"connection_name": found.get("display_name") or "Unknown connection", "connection_tenant_id": found.get("tenant_id") or None}
+
+
+async def assert_connection_reference_exists(connection_id: str | None) -> None:
+    """File-backed connection ids have no database FK, so validate every direct assignment."""
+    if not connection_id:
+        return
+    known = {item["id"] for item in await list_connections(public=True)}
+    if connection_id not in known:
+        raise HTTPException(status_code=422, detail="Azure connection does not exist")
 
 
 def group_payload(tree: GroupTree, group: Group, labels: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -570,6 +580,7 @@ async def login(payload: LoginRequest, request: Request, response: Response, db:
     await create_login_session(db, user, response, request, "local")
     audit(db, user, "auth.login", "user", user.id)
     await db.commit()
+    cache_permissions(user, await effective_permissions(db, user))
     return {"user": user_view(user), "password_policy": policy_view(policy)}
 
 
@@ -883,7 +894,7 @@ async def demo_data_remove(user: User = Depends(require_csrf), db: AsyncSession 
 
 
 @app.get("/api/dashboard")
-async def dashboard(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def dashboard(user: User = Depends(require_permission("dashboard.read")), db: AsyncSession = Depends(get_db)):
     policy = await get_security_policy(db)
     labels = await connection_labels()
     tree = await load_tree(db)
@@ -937,7 +948,7 @@ async def dashboard(user: User = Depends(current_user), db: AsyncSession = Depen
 async def overview(
     from_: datetime | None = Query(None, alias="from"),
     to: datetime | None = None,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission("dashboard.read")),
     db: AsyncSession = Depends(get_db),
 ):
     """Windowed operations overview: KPIs with trend, readiness checks, coverage gaps and the rollout plan."""
@@ -967,9 +978,12 @@ async def overview(
 async def groups_list(shape: str = Query("tree", pattern="^(tree|flat)$"), user: User = Depends(require_permission("groups.read")), db: AsyncSession = Depends(get_db)):
     tree = await load_tree(db)
     labels = await connection_labels()
-    vm_counts = dict((await db.execute(select(VirtualMachine.group_id, func.count()).group_by(VirtualMachine.group_id))).all())
-    schedule_counts = dict((await db.execute(select(Schedule.target_id, func.count()).where(Schedule.target_type == "group").group_by(Schedule.target_id))).all())
-    group_next = dict((await db.execute(select(Schedule.target_id, func.min(Schedule.next_run_at)).where(Schedule.target_type == "group", Schedule.enabled.is_(True), Schedule.next_run_at.is_not(None)).group_by(Schedule.target_id))).all())
+    vm_counts = dict((await db.execute(select(VirtualMachine.group_id, func.count()).group_by(VirtualMachine.group_id))).all()) if has_permission(user, "vms.read") else {}
+    if has_permission(user, "schedules.read"):
+        schedule_counts = dict((await db.execute(select(Schedule.target_id, func.count()).where(Schedule.target_type == "group").group_by(Schedule.target_id))).all())
+        group_next = dict((await db.execute(select(Schedule.target_id, func.min(Schedule.next_run_at)).where(Schedule.target_type == "group", Schedule.enabled.is_(True), Schedule.next_run_at.is_not(None)).group_by(Schedule.target_id))).all())
+    else:
+        schedule_counts, group_next = {}, {}
     nodes = sorted(tree.by_id.values(), key=lambda item: (item.depth, item.sequence, item.name.lower()))
     items = []
     for group in nodes:
@@ -1002,6 +1016,7 @@ async def group_create(payload: GroupInput, user: User = Depends(require_csrf), 
     parent = await db.get(Group, payload.parent_id) if payload.parent_id else None
     if payload.parent_id and not parent:
         raise HTTPException(status_code=422, detail="Parent group not found")
+    await assert_connection_reference_exists(payload.azure_connection_id)
     try:
         assert_parent_allowed(parent)
     except ValueError as exc:
@@ -1010,7 +1025,7 @@ async def group_create(payload: GroupInput, user: User = Depends(require_csrf), 
         await assert_unique_sibling_name(db, payload.parent_id, payload.name)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    group = Group(id=new_id(), parent_id=payload.parent_id, name=payload.name.strip(), description=payload.description, azure_connection_id=payload.azure_connection_id, enabled=payload.enabled, sequence=await next_sequence(db, payload.parent_id), created_by=user.id)
+    group = Group(id=new_id(), parent_id=payload.parent_id, name=payload.name.strip(), description=payload.description, azure_connection_id=payload.azure_connection_id, enabled=payload.enabled, never_stop=payload.never_stop, sequence=await next_sequence(db, payload.parent_id), created_by=user.id)
     db.add(group)
     await db.flush()
     try:
@@ -1029,8 +1044,8 @@ async def group_detail(group_id: str, user: User = Depends(require_permission("g
     group = await load_group(db, group_id)
     tree = await load_tree(db)
     labels = await connection_labels()
-    vms = (await db.scalars(select(VirtualMachine).where(VirtualMachine.group_id == group_id))).all()
-    schedules = (await db.scalars(select(Schedule).where(Schedule.target_type == "group", Schedule.target_id == group_id))).all()
+    vms = (await db.scalars(select(VirtualMachine).where(VirtualMachine.group_id == group_id))).all() if has_permission(user, "vms.read") else []
+    schedules = (await db.scalars(select(Schedule).where(Schedule.target_type == "group", Schedule.target_id == group_id))).all() if has_permission(user, "schedules.read") else []
     return {
         "group": group_payload(tree, group, labels),
         "ancestors": [group_payload(tree, item, labels) for item in reversed(tree.chain(group_id)[1:])],
@@ -1045,13 +1060,15 @@ async def group_update(group_id: str, payload: GroupPatch, user: User = Depends(
         raise HTTPException(status_code=403, detail="Permission required: groups.write")
     group = await load_group(db, group_id)
     values = payload.model_dump(exclude_unset=True)
+    if "azure_connection_id" in values:
+        await assert_connection_reference_exists(values["azure_connection_id"])
     if "name" in values and values["name"]:
         try:
             await assert_unique_sibling_name(db, group.parent_id, values["name"], exclude_id=group.id)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         group.name = values["name"].strip()
-    for key in ("description", "azure_connection_id", "enabled"):
+    for key in ("description", "azure_connection_id", "enabled", "never_stop"):
         if key in values:
             setattr(group, key, values[key])
     audit(db, user, "group.updated", "group", group.id, values)
@@ -1068,6 +1085,12 @@ async def group_delete(group_id: str, user: User = Depends(require_csrf), db: As
     tree = await load_tree(db)
     subtree = tree.subtree_ids(group_id)
     vm_ids = list((await db.scalars(select(VirtualMachine.id).where(VirtualMachine.group_id.in_(list(subtree))))).all())
+    group_schedule_count = int(await db.scalar(select(func.count()).select_from(Schedule).where(Schedule.target_type == "group", Schedule.target_id.in_(list(subtree)))) or 0)
+    vm_schedule_count = int(await db.scalar(select(func.count()).select_from(Schedule).where(Schedule.target_type == "vm", Schedule.target_id.in_(vm_ids))) or 0) if vm_ids else 0
+    if vm_ids and not has_permission(user, "vms.write"):
+        raise HTTPException(status_code=403, detail="Permission required: vms.write because this group contains virtual machines")
+    if (group_schedule_count or vm_schedule_count) and not has_permission(user, "schedules.write"):
+        raise HTTPException(status_code=403, detail="Permission required: schedules.write because this group contains schedules")
     await db.execute(delete(Schedule).where(Schedule.target_type == "group", Schedule.target_id.in_(list(subtree))))
     if vm_ids:
         await db.execute(delete(Schedule).where(Schedule.target_type == "vm", Schedule.target_id.in_(vm_ids)))
@@ -1120,6 +1143,8 @@ async def groups_reorder(payload: GroupReorder, user: User = Depends(require_csr
 async def group_vms(
     group_id: str,
     recursive: bool = True,
+    q: str | None = None,
+    enabled: bool | None = None,
     sort: str | None = None,
     direction: SortDirection = "asc",
     limit: int = Query(200, ge=1, le=1000),
@@ -1132,6 +1157,7 @@ async def group_vms(
     labels = await connection_labels()
     scope = tree.subtree_ids(group_id) if recursive else {group_id}
     statement = select(VirtualMachine).where(VirtualMachine.group_id.in_(list(scope)))
+    statement = _vm_filter(statement, tree, q, None, enabled, None)
     total = await db.scalar(select(func.count()).select_from(statement.subquery()))
     ordered = _sorted(statement, VM_SORT_COLUMNS, sort, direction, "vm_name")
     items = (await db.scalars(ordered.limit(limit).offset(offset))).all()
@@ -1143,6 +1169,7 @@ async def group_vms_add(group_id: str, payload: VmBulkAdd, response: Response, u
     if not has_permission(user, "vms.write"):
         raise HTTPException(status_code=403, detail="Permission required: vms.write")
     await load_group(db, group_id)
+    await assert_connection_reference_exists(payload.azure_connection_id)
     created: list[VirtualMachine] = []
     errors: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1379,6 +1406,8 @@ async def vm_update(vm_id: str, payload: VmPatch, user: User = Depends(require_c
         raise HTTPException(status_code=403, detail="Permission required: vms.write")
     vm = await load_vm(db, vm_id)
     values = payload.model_dump(exclude_unset=True)
+    if "azure_connection_id" in values:
+        await assert_connection_reference_exists(values["azure_connection_id"])
     if values.get("group_id"):
         await load_group(db, values["group_id"])
     for key, value in values.items():
@@ -1394,6 +1423,9 @@ async def vm_delete(vm_id: str, user: User = Depends(require_csrf), db: AsyncSes
     if not has_permission(user, "vms.write"):
         raise HTTPException(status_code=403, detail="Permission required: vms.write")
     vm = await load_vm(db, vm_id)
+    has_schedules = bool(await db.scalar(select(Schedule.id).where(Schedule.target_type == "vm", Schedule.target_id == vm.id).limit(1)))
+    if has_schedules and not has_permission(user, "schedules.write"):
+        raise HTTPException(status_code=403, detail="Permission required: schedules.write because this VM has a direct schedule")
     await db.execute(delete(Schedule).where(Schedule.target_type == "vm", Schedule.target_id == vm.id))
     audit(db, user, "vm.deleted", "virtual_machine", vm.id, {"vm_resource_id": vm.vm_resource_id})
     await db.delete(vm)
@@ -1418,6 +1450,9 @@ async def vms_bulk(payload: VmBulkAction, user: User = Depends(require_csrf), db
     else:
         ids = [vm.id for vm in vms]
         if ids:
+            has_schedules = bool(await db.scalar(select(Schedule.id).where(Schedule.target_type == "vm", Schedule.target_id.in_(ids)).limit(1)))
+            if has_schedules and not has_permission(user, "schedules.write"):
+                raise HTTPException(status_code=403, detail="Permission required: schedules.write because a selected VM has a direct schedule")
             await db.execute(delete(Schedule).where(Schedule.target_type == "vm", Schedule.target_id.in_(ids)))
         for vm in vms:
             await db.delete(vm)
@@ -1603,6 +1638,7 @@ async def timeline(
                     "group_path": tree.name_path(schedule.target_id) if schedule.target_type == "group" else tree.name_path(vms[0].group_id) if vms else "",
                     "vm_count": len(vms),
                     "stagger_seconds": schedule.stagger_seconds,
+                    "timezone": schedule.timezone,
                     **connection_fields(labels, schedule.azure_connection_id),
                 })
             cursor = occurrence
@@ -1618,12 +1654,16 @@ async def schedule_detail(schedule_id: str, user: User = Depends(require_permiss
         raise HTTPException(status_code=404, detail="Schedule not found")
     tree = await load_tree(db)
     labels = await connection_labels()
-    vm_names = dict((await db.execute(select(VirtualMachine.id, VirtualMachine.vm_name))).all())
-    attempts = (await db.scalars(select(VmAttempt).where(VmAttempt.schedule_id == schedule_id).order_by(VmAttempt.claimed_at.desc()).limit(200))).all()
-    runs = (await db.scalars(select(ScheduleRun).where(ScheduleRun.schedule_id == schedule_id).order_by(ScheduleRun.created_at.desc()).limit(20))).all()
-    vms = await resolve_schedule_vms(db, schedule, tree)
+    vm_names = dict((await db.execute(select(VirtualMachine.id, VirtualMachine.vm_name).where(VirtualMachine.id == schedule.target_id))).all()) if schedule.target_type == "vm" else {}
+    if has_permission(user, "runs.read"):
+        attempts = (await db.scalars(select(VmAttempt).where(VmAttempt.schedule_id == schedule_id).order_by(VmAttempt.claimed_at.desc()).limit(200))).all()
+        runs = (await db.scalars(select(ScheduleRun).where(ScheduleRun.schedule_id == schedule_id).order_by(ScheduleRun.created_at.desc()).limit(20))).all()
+    else:
+        attempts, runs = [], []
+    resolved_vms = await resolve_schedule_vms(db, schedule, tree)
+    vms = resolved_vms if has_permission(user, "vms.read") else []
     return {
-        "schedule": schedule_payload(tree, schedule, labels, vm_names),
+        "schedule": {**schedule_payload(tree, schedule, labels, vm_names), "vm_count": len(resolved_vms)},
         "vms": [vm_payload(tree, item, labels) for item in vms],
         "attempts": [attempt_payload(item, labels) for item in attempts],
         "runs": [run_payload(item, labels) for item in runs],
@@ -1763,13 +1803,15 @@ async def runs_activity(
 
     events: list[dict[str, Any]] = []
     for run in runs:
+        action = run.action or "start"
+        succeeded_label = "started" if action == "start" else "stopped"
         events.append({
             "id": f"run:{run.id}:started",
             "at": _aware(run.started_at or run.created_at),
             "kind": "Wave",
             "severity": "info",
             "title": run.schedule_name,
-            "summary": f"Started a {run.trigger} wave covering {run.total_count} virtual machine{'' if run.total_count == 1 else 's'}.",
+            "summary": f"Began a {run.trigger} {action} wave covering {run.total_count} virtual machine{'' if run.total_count == 1 else 's'}.",
             "run_id": run.id,
             "status": run.status,
             "mode": run.mode,
@@ -1781,7 +1823,7 @@ async def runs_activity(
                 "kind": "Wave",
                 "severity": RUN_SEVERITY.get(run.status, "info"),
                 "title": run.schedule_name,
-                "summary": f"Wave {run.status.replace('_', ' ')} — {run.succeeded_count} started, {run.failed_count} failed, {run.skipped_count} skipped.",
+                "summary": f"Wave {run.status.replace('_', ' ')} — {run.succeeded_count} {succeeded_label}, {run.failed_count} failed, {run.skipped_count} skipped.",
                 "run_id": run.id,
                 "status": run.status,
                 "mode": run.mode,
@@ -1792,13 +1834,14 @@ async def runs_activity(
         if not stamp:
             continue
         name = attempt.vm_resource_id.rsplit("/", 1)[-1] or "virtual machine"
+        action = attempt.action or "start"
         events.append({
             "id": f"attempt:{attempt.id}",
             "at": stamp,
-            "kind": "Start attempt",
+            "kind": f"{action.title()} attempt",
             "severity": ATTEMPT_SEVERITY.get(attempt.status, "info"),
             "title": name,
-            "summary": attempt.message or f"Start attempt {attempt.status.replace('_', ' ')}.",
+            "summary": attempt.message or f"{action.title()} attempt {attempt.status.replace('_', ' ')}.",
             "run_id": attempt.run_id,
             "attempt_id": attempt.id,
             "schedule_name": run.schedule_name if run else "",
@@ -1902,6 +1945,7 @@ async def _commit_inventory(payload: CsvCommitRequest, user: User, db: AsyncSess
     created_vms: list[VirtualMachine] = []
     errors: list[dict[str, Any]] = []
     seen: set[str] = set()
+    known_connections = {item["id"] for item in await list_connections(public=True)}
     for index, row in enumerate(payload.rows, start=1):
         try:
             resource_id = str(row.get("vm_resource_id", ""))
@@ -1910,10 +1954,13 @@ async def _commit_inventory(payload: CsvCommitRequest, user: User, db: AsyncSess
             if normalized in seen or await db.scalar(select(VirtualMachine.id).where(VirtualMachine.normalized_resource_id == normalized)):
                 errors.append({"row": index, "error": "This VM is already in the inventory"})
                 continue
+            connection_id = row.get("azure_connection_id")
+            if connection_id and connection_id not in known_connections:
+                raise ValueError("The selected Azure connection no longer exists")
             seen.add(normalized)
             segments = [str(row.get("application", ""))] + [item for item in str(row.get("ring_path", "")).split("/") if item.strip()]
             group = await _ensure_group_path(db, [item.strip() for item in segments if item.strip()], user, created_groups)
-            created_vms.append(VirtualMachine(id=new_id(), group_id=group.id, vm_resource_id=resource_id.strip(), normalized_resource_id=normalized, display_name=str(row.get("display_name") or parsed.vm_name), subscription_id=parsed.subscription_id, resource_group=parsed.resource_group, vm_name=parsed.vm_name, azure_connection_id=row.get("azure_connection_id"), enabled=bool(row.get("enabled", True)), never_stop=bool(row.get("never_stop", False)), notes=str(row.get("notes", "")), created_by=user.id))
+            created_vms.append(VirtualMachine(id=new_id(), group_id=group.id, vm_resource_id=resource_id.strip(), normalized_resource_id=normalized, display_name=str(row.get("display_name") or parsed.vm_name), subscription_id=parsed.subscription_id, resource_group=parsed.resource_group, vm_name=parsed.vm_name, azure_connection_id=connection_id, enabled=bool(row.get("enabled", True)), never_stop=bool(row.get("never_stop", False)), notes=str(row.get("notes", "")), created_by=user.id))
         except Exception as exc:
             errors.append({"row": index, "error": _validation_message(exc)})
     if errors and payload.reject_all:
@@ -1938,7 +1985,7 @@ async def csv_commit(payload: CsvCommitRequest, user: User = Depends(require_csr
     default_zone = resolve_default_timezone(policy)
     pending: list[Schedule] = []
     errors: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     created_groups: list[str] = []
     for index, row in enumerate(payload.rows, start=1):
         try:
@@ -1981,7 +2028,10 @@ async def csv_commit(payload: CsvCommitRequest, user: User = Depends(require_csr
 
 
 @app.get("/api/connections")
-async def connections_list(user: User = Depends(require_permission("schedules.read"))):
+async def connections_list(user: User = Depends(current_user)):
+    readers = ("groups.read", "vms.read", "schedules.read", "imports.write", "connections.manage")
+    if not any(has_permission(user, permission) for permission in readers):
+        raise HTTPException(status_code=403, detail="Permission required to view Azure connection metadata")
     return await list_connections(public=True)
 
 
@@ -2000,6 +2050,20 @@ async def connection_upsert(payload: ConnectionInput, user: User = Depends(requi
 @app.delete("/api/connections/{connection_id}")
 async def connection_delete(connection_id: str, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
     require_manage(user, "connections.manage")
+    known = {item["id"] for item in await list_connections(public=True)}
+    if connection_id not in known:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    group_count = int(await db.scalar(select(func.count()).select_from(Group).where(Group.azure_connection_id == connection_id)) or 0)
+    vm_count = int(await db.scalar(select(func.count()).select_from(VirtualMachine).where(VirtualMachine.azure_connection_id == connection_id)) or 0)
+    schedule_count = int(await db.scalar(select(func.count()).select_from(Schedule).where(Schedule.azure_connection_id == connection_id)) or 0)
+    if group_count or vm_count or schedule_count:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Connection is still referenced by "
+                f"{group_count} group(s), {vm_count} virtual machine(s), and {schedule_count} schedule(s)"
+            ),
+        )
     if not await delete_connection(connection_id):
         raise HTTPException(status_code=404, detail="Connection not found")
     audit(db, user, "connection.deleted", "connection", connection_id)
@@ -2056,16 +2120,18 @@ async def connection_test(connection_id: str, user: User = Depends(require_csrf)
     return await connection_live_action(connection_id, "tested", user, db)
 
 
-@app.get("/api/connections/{connection_id}/discover")
-async def connection_discover(connection_id: str, user: User = Depends(require_permission("connections.manage")), db: AsyncSession = Depends(get_db)):
+@app.post("/api/connections/{connection_id}/discover")
+async def connection_discover(connection_id: str, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
+    require_manage(user, "connections.manage")
     return await connection_live_action(connection_id, "discovered", user, db)
 
 
-@app.get("/api/connections/{connection_id}/vms")
-async def connection_vms(connection_id: str, subscription_id: str = Query(...), user: User = Depends(require_permission("vms.read")), db: AsyncSession = Depends(get_db)):
+@app.post("/api/connections/{connection_id}/vms")
+async def connection_vms(connection_id: str, payload: VmDiscoveryInput, user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
     """Live ARM lookup; never triggered by scheduling."""
+    require_manage(user, "vms.read")
     try:
-        subscription = parse_subscription_id(subscription_id)
+        subscription = parse_subscription_id(payload.subscription_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     connection = await get_connection(connection_id)
@@ -2314,26 +2380,33 @@ async def notifications_list(
 ):
     statement = select(NotificationEvent)
     if unread_only:
-        statement = statement.where(NotificationEvent.read.is_(False))
+        statement = statement.where(~read_receipt_exists(user.id))
     if severity:
         statement = statement.where(NotificationEvent.severity == severity)
     total = await db.scalar(select(func.count()).select_from(statement.subquery()))
     items = (await db.scalars(statement.order_by(NotificationEvent.created_at.desc()).limit(limit).offset(offset))).all()
-    return {"items": [NotificationEventView.model_validate(item).model_dump(mode="json") for item in items], "total": total or 0, "limit": limit, "offset": offset, "unread": await unread_count(db)}
+    read_ids = await read_event_ids(db, user.id, [item.id for item in items])
+    payloads = []
+    for item in items:
+        payload = NotificationEventView.model_validate(item).model_dump(mode="json")
+        payload["read"] = item.id in read_ids
+        payloads.append(payload)
+    return {"items": payloads, "total": total or 0, "limit": limit, "offset": offset, "unread": await unread_count(db, user.id)}
 
 
 @app.get("/api/notifications/unread-count")
 async def notifications_unread_count(user: User = Depends(require_permission("notifications.read")), db: AsyncSession = Depends(get_db)):
-    return {"count": await unread_count(db)}
+    return {"count": await unread_count(db, user.id)}
 
 
 @app.post("/api/notifications/read-all")
 async def notifications_read_all(user: User = Depends(require_csrf), db: AsyncSession = Depends(get_db)):
     require_manage(user, "notifications.read")
-    result = await db.execute(update(NotificationEvent).where(NotificationEvent.read.is_(False)).values(read=True))
-    audit(db, user, "notification.read_all", "notification_event", None, {"count": result.rowcount})
+    unread = list((await db.scalars(select(NotificationEvent.id).where(~read_receipt_exists(user.id)))).all())
+    count = await mark_events_read(db, user.id, unread)
+    audit(db, user, "notification.read_all", "notification_event", None, {"count": count})
     await db.commit()
-    return {"ok": True, "count": result.rowcount}
+    return {"ok": True, "count": count}
 
 
 @app.post("/api/notifications/{event_id}/read")
@@ -2342,7 +2415,7 @@ async def notification_read(event_id: str, user: User = Depends(require_csrf), d
     event = await db.get(NotificationEvent, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Notification not found")
-    event.read = True
+    await mark_events_read(db, user.id, [event.id])
     audit(db, user, "notification.read", "notification_event", event_id)
     await db.commit()
     return {"ok": True}

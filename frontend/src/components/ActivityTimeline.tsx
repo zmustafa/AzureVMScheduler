@@ -185,7 +185,7 @@ export function ActivityTimeline({
     {loading
       ? <p className="mt-3 text-sm text-slate-500">Loading activity…</p>
       : events.length === 0
-        ? <p className="mt-3 text-sm text-slate-500">No wave or start-attempt activity in this window.</p>
+        ? <p className="mt-3 text-sm text-slate-500">No wave or VM-attempt activity in this window.</p>
         : <ul className="mt-3 max-h-96 space-y-2 overflow-y-auto pr-1">
           {events.map((event) => <li key={event.id} className="flex gap-3 rounded-lg border border-slate-200 p-3">
             <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${BAR_TONES[SEVERITY_RANK[event.severity] ?? 0]}`} aria-hidden="true" />

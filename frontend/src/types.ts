@@ -348,7 +348,7 @@ export type VmNameResolution = {
   items: ResolvedVmName[]
 }
 
-export type TimelineBlock = { schedule_id: string; name: string; action: ScheduleAction; stop_mode: StopMode; start: string; end: string; group_path: string; vm_count: number; stagger_seconds: number } & ConnectionRef
+export type TimelineBlock = { schedule_id: string; name: string; action: ScheduleAction; stop_mode: StopMode; start: string; end: string; group_path: string; vm_count: number; stagger_seconds: number; timezone: string } & ConnectionRef
 export type UpcomingSchedule = { schedule_id: string; name: string; action: ScheduleAction; stop_mode: StopMode; next_run_at: string | null; timezone: string; stagger_seconds: number; target_type: TargetType; target_id: string; group_path: string; vm_count: number } & ConnectionRef
 
 export type GeneralSettings = { app_name: string; environment: string; real_azure_starts_enabled: boolean; real_azure_stops_enabled: boolean; default_timezone: string; server_time: string; password_policy: Record<string, unknown> }

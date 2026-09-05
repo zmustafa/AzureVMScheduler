@@ -49,6 +49,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r backend/requirements-dev.txt
 
+      - name: Validate a clean migration chain
+        working-directory: backend
+        env:
+          DATABASE_URL: >-
+            ${{ matrix.database == 'postgresql'
+                && 'postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/azureops_test'
+                || 'sqlite+aiosqlite:////tmp/azureops-migrations.db' }}
+        run: python -m alembic upgrade head
+
       - name: Run the test suite
         working-directory: backend
         env:

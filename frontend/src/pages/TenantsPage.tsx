@@ -16,7 +16,7 @@ export function TenantsPage(){
   const remove=useMutation({mutationFn:(id:string)=>api(`/connections/${id}`,json('DELETE')),onSuccess:()=>void refresh()})
   const makeDefault=useMutation({mutationFn:(id:string)=>api(`/connections/${id}/default`,json('POST')),onSuccess:()=>void refresh()})
   const test=useMutation({mutationFn:(id:string)=>api<{subscriptions:{id:string;name:string}[]}>(`/connections/${id}/test`,json('POST')),onSuccess:(data,id)=>{setDiscovered(current=>({...current,[id]:data.subscriptions}));setNotice(`Connected. ${data.subscriptions.length} subscription(s) visible.`);void refresh()}})
-  const discover=useMutation({mutationFn:(id:string)=>api<{subscriptions:{id:string;name:string}[]}>(`/connections/${id}/discover`),onSuccess:(data,id)=>setDiscovered(current=>({...current,[id]:data.subscriptions}))})
+  const discover=useMutation({mutationFn:(id:string)=>api<{subscriptions:{id:string;name:string}[]}>(`/connections/${id}/discover`,json('POST')),onSuccess:(data,id)=>setDiscovered(current=>({...current,[id]:data.subscriptions}))})
   const submit=(event:FormEvent<HTMLFormElement>)=>{event.preventDefault();save.mutate(form!)}
   const method=form?.auth_method
   return <><PageHeader title="Azure Tenants" description="Encrypted local credential registry for Azure subscriptions." action={<button className="btn-primary" onClick={()=>setForm(form?undefined:blank)}>{form?<X size={17}/>:<Plus size={17}/>} {form?'Close':'Connect tenant'}</button>}/>

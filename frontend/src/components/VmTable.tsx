@@ -70,9 +70,9 @@ function useVmMutations(onDone: () => void) {
   return { patch, remove, bulk }
 }
 
-function VmEditDrawer({ vm, onClose }: { vm: VirtualMachine | null; onClose: () => void }) {
+function VmEditDrawer({ vm, onClose, canReadGroups, canDelete }: { vm: VirtualMachine | null; onClose: () => void; canReadGroups: boolean; canDelete: boolean }) {
   const connections = useConnections()
-  const tree = useGroupTree()
+  const tree = useGroupTree(canReadGroups)
   const { patch, remove } = useVmMutations(onClose)
   const [displayName, setDisplayName] = useState('')
   const [enabled, setEnabled] = useState(true)
@@ -100,7 +100,7 @@ function VmEditDrawer({ vm, onClose }: { vm: VirtualMachine | null; onClose: () 
       title={vm.display_name || vm.vm_name}
       description={vm.vm_resource_id}
       footer={<>
-        <button type="button" className="btn-danger" onClick={() => setConfirmDelete(true)}><Trash2 size={15} />Delete</button>
+        {canDelete && <button type="button" className="btn-danger" onClick={() => setConfirmDelete(true)}><Trash2 size={15} />Delete</button>}
         <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
         <button type="button" className="btn-primary" disabled={patch.isPending} onClick={() => patch.mutate({ id: vm.id, body: { display_name: displayName, enabled, never_stop: neverStop, azure_connection_id: connectionId || null, notes, group_id: groupId ?? vm.group_id } })}>{patch.isPending ? 'Saving…' : 'Save changes'}</button>
       </>}
@@ -115,9 +115,9 @@ function VmEditDrawer({ vm, onClose }: { vm: VirtualMachine | null; onClose: () 
           </select>
         </Field>
         <Field label="Notes"><textarea rows={3} value={notes} onChange={(event) => setNotes(event.target.value)} /></Field>
-        <Field label="Group" hint={`Currently in ${vm.group_path}`}>
+        {canReadGroups && <Field label="Group" hint={`Currently in ${vm.group_path}`}>
           <GroupPicker nodes={tree.data ?? []} value={groupId} onChange={setGroupId} label="Group" />
-        </Field>
+        </Field>}
         <label className="flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
           <input className="!w-auto" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
           <span><span className="block text-sm font-medium text-slate-800">Enabled</span><span className="text-xs text-slate-500">Disabled VMs are skipped by every schedule.</span></span>
@@ -139,9 +139,10 @@ function VmEditDrawer({ vm, onClose }: { vm: VirtualMachine | null; onClose: () 
   </>
 }
 
-function BulkMoveDrawer({ open, count, onClose, onMove, busy }: { open: boolean; count: number; onClose: () => void; onMove: (groupId: string) => void; busy: boolean }) {
-  const tree = useGroupTree()
+function BulkMoveDrawer({ open, count, onClose, onMove, busy, canReadGroups }: { open: boolean; count: number; onClose: () => void; onMove: (groupId: string) => void; busy: boolean; canReadGroups: boolean }) {
+  const tree = useGroupTree(canReadGroups)
   const [groupId, setGroupId] = useState<string | null>(null)
+  useEffect(() => { if (!open) setGroupId(null) }, [open])
   return <Drawer
     open={open}
     onClose={onClose}
@@ -161,10 +162,11 @@ type Props = { groupId?: string; groupName?: string; title?: string; description
 /** Virtual machine inventory table with server-side paging, filters, bulk actions and inline editing. */
 export function VmTable({ groupId, groupName, title = 'Virtual machines', description = 'Inventory resolved from the group hierarchy.', canHaveRings = true }: Props) {
   const canWrite = useCan('vms.write')
+  const canReadGroups = useCan('groups.read')
   // Running a wave by hand is a scheduling action, not an inventory edit.
   const canRunWaves = useCan('schedules.write')
   const connections = useConnections()
-  const tree = useGroupTree()
+  const tree = useGroupTree(canReadGroups)
   const [query, setQuery] = useState('')
   const [enabledFilter, setEnabledFilter] = useState('')
   const [connectionFilter, setConnectionFilter] = useState('')
@@ -185,6 +187,7 @@ export function VmTable({ groupId, groupName, title = 'Virtual machines', descri
   const { sort, toggle, params: sortParams } = useSort({ key: 'vm_name', direction: 'asc' })
 
   useEffect(() => { setOffset(0); setSelected(new Set()) }, [query, enabledFilter, connectionFilter, groupFilter, includeRings, groupId, sort])
+  useEffect(() => { setSelected(new Set()) }, [offset, powerFilter])
 
   /** Filters shared by the table query and the CSV export, so the export matches what you see. */
   const filterParams = useMemo(() => {
@@ -200,7 +203,12 @@ export function VmTable({ groupId, groupName, title = 'Virtual machines', descri
   }, [query, enabledFilter, connectionFilter, groupFilter, groupId, includeRings])
 
   const path = useMemo(() => {
-    if (groupId) return `/groups/${groupId}/vms?recursive=${includeRings}&${sortParams}&limit=${LIMIT}&offset=${offset}`
+    if (groupId) {
+      const params = new URLSearchParams({ recursive: String(includeRings), limit: String(LIMIT), offset: String(offset) })
+      if (query.trim()) params.set('q', query.trim())
+      if (enabledFilter) params.set('enabled', enabledFilter)
+      return `/groups/${groupId}/vms?${params.toString()}&${sortParams}`
+    }
     const params = new URLSearchParams({ limit: String(LIMIT), offset: String(offset) })
     if (query.trim()) params.set('q', query.trim())
     if (enabledFilter) params.set('enabled', enabledFilter)
@@ -227,12 +235,8 @@ export function VmTable({ groupId, groupName, title = 'Virtual machines', descri
 
   /** Rows the server returned for this page, before the client-side power filter. */
   const pageRows = useMemo(() => {
-    const items = list.data?.items ?? []
-    if (!groupId) return items
-    const needle = query.trim().toLowerCase()
-    const filtered = needle ? items.filter((item) => `${item.display_name} ${item.vm_name} ${item.vm_resource_id}`.toLowerCase().includes(needle)) : items
-    return enabledFilter ? filtered.filter((item) => String(item.enabled) === enabledFilter) : filtered
-  }, [list.data, groupId, query, enabledFilter])
+    return list.data?.items ?? []
+  }, [list.data])
 
   // Power state is live, not stored, so it can only narrow the rows already scanned on this page.
   const rows = useMemo(
@@ -316,10 +320,10 @@ export function VmTable({ groupId, groupName, title = 'Virtual machines', descri
           <option value="">Any tenant</option>
           {connections.data?.map((item) => <option key={item.id} value={item.id}>{connectionOptionLabel(item)}</option>)}
         </select>
-        <select className="!w-auto" value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)} aria-label="Filter by group">
+        {canReadGroups && <select className="!w-auto" value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)} aria-label="Filter by group">
           <option value="">Any group</option>
           {(tree.data ?? []).flatMap(function walk(node): { id: string; label: string }[] { return [{ id: node.id, label: node.name_path }, ...(node.children ?? []).flatMap(walk)] }).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-        </select>
+        </select>}
       </>}
       <select
         className="!w-auto"
@@ -342,10 +346,10 @@ export function VmTable({ groupId, groupName, title = 'Virtual machines', descri
         <button type="button" className="btn-secondary !py-1" onClick={() => setPowerAction('stop')}><Square size={13} />Stop now</button>
         <span className="h-4 w-px bg-blue-200" aria-hidden="true" />
       </>}
-      <button type="button" className="btn-secondary !py-1" onClick={() => setMoving(true)}>Move to group</button>
+      {canReadGroups && <button type="button" className="btn-secondary !py-1" onClick={() => setMoving(true)}>Move to group</button>}
       <button type="button" className="btn-secondary !py-1" onClick={() => setConfirm('enable')}>Enable</button>
       <button type="button" className="btn-secondary !py-1" onClick={() => setConfirm('disable')}>Disable</button>
-      <button type="button" className="btn-danger !py-1" onClick={() => setConfirm('delete')}>Delete</button>
+      {canRunWaves && <button type="button" className="btn-danger !py-1" onClick={() => setConfirm('delete')}>Delete</button>}
       <button type="button" className="ml-auto link" onClick={() => setSelected(new Set())}>Clear selection</button>
     </div>}
 
@@ -399,10 +403,10 @@ export function VmTable({ groupId, groupName, title = 'Virtual machines', descri
       <div className="surface"><Pagination total={list.data?.total ?? 0} limit={LIMIT} offset={offset} onChange={setOffset} /></div>
     </>}
 
-    <VmEditDrawer vm={editing} onClose={() => setEditing(null)} />
+    <VmEditDrawer vm={editing} onClose={() => setEditing(null)} canReadGroups={canReadGroups} canDelete={canRunWaves} />
     <PowerActionDialog open={powerAction !== null} action={powerAction ?? 'start'} vms={selectedVms} onClose={() => setPowerAction(null)} />
     {groupId && <AddVmsDrawer open={adding} onClose={() => setAdding(false)} groupId={groupId} groupName={groupName ?? 'this group'} />}
-    <BulkMoveDrawer open={moving} count={selected.size} busy={bulk.isPending} onClose={() => setMoving(false)} onMove={(destination) => bulk.mutate({ vm_ids: [...selected], action: 'move', group_id: destination })} />
+    <BulkMoveDrawer open={moving} count={selected.size} busy={bulk.isPending} canReadGroups={canReadGroups} onClose={() => setMoving(false)} onMove={(destination) => bulk.mutate({ vm_ids: [...selected], action: 'move', group_id: destination })} />
     <ConfirmDialog
       open={confirm !== null}
       title={confirm === 'delete' ? 'Delete virtual machines' : confirm === 'enable' ? 'Enable virtual machines' : 'Disable virtual machines'}

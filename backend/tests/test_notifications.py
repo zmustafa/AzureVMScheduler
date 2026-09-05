@@ -8,7 +8,7 @@ import pytest_asyncio
 from app import connections
 from app.connectors import registry as registry_module
 from app.hierarchy import GroupTree
-from app.models import Group, NotificationDelivery, NotificationEvent, NotificationRule, new_id
+from app.models import Group, NotificationDelivery, NotificationEvent, NotificationRule, User, new_id
 from app.notifications import (
     delivers_immediately,
     digest_due_at,
@@ -200,6 +200,27 @@ async def test_events_reach_the_feed_even_with_no_rules(session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_attempt_notification_body_names_the_stop_action(session, monkeypatch) -> None:
+    from app import scheduling
+    from app.models import VmAttempt
+
+    attempt = VmAttempt(
+        id=new_id(), vm_resource_id="/subscriptions/s/resourceGroups/r/providers/Microsoft.Compute/virtualMachines/vm-stop",
+        action="stop", status="skipped", message="",
+    )
+    captured: dict[str, object] = {}
+
+    async def capture_publish(_session, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(scheduling, "publish", capture_publish)
+    await scheduling._publish_attempt_event(session, attempt)
+
+    assert captured["body"] == "The stop attempt for vm-stop ended as skipped."
+
+
+@pytest.mark.asyncio
 async def test_fingerprint_dedup_publishes_once(session) -> None:
     first = await publish(session, type="schedule.missed", severity="critical", title="Missed", body="", fingerprint="schedule.missed:s1:2027-05-04T12:00:00+00:00")
     second = await publish(session, type="schedule.missed", severity="critical", title="Missed", body="", fingerprint="schedule.missed:s1:2027-05-04T12:00:00+00:00")
@@ -207,6 +228,110 @@ async def test_fingerprint_dedup_publishes_once(session) -> None:
     from sqlalchemy import func, select
 
     assert await session.scalar(select(func.count()).select_from(NotificationEvent)) == 1
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_dedup_survives_a_concurrent_insert(session, monkeypatch) -> None:
+    """A stale pre-check must lose cleanly to the database unique constraint."""
+    fingerprint = "schedule.missed:s1:2027-05-04T12:00:00+00:00"
+    existing = NotificationEvent(
+        id=new_id(), type="schedule.missed", severity="critical", title="Missed", body="",
+        fingerprint=fingerprint,
+    )
+    session.add(existing)
+    await session.commit()
+
+    real_scalar = session.scalar
+    calls = 0
+
+    async def stale_once(statement):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return None
+        return await real_scalar(statement)
+
+    monkeypatch.setattr(session, "scalar", stale_once)
+    result = await publish(
+        session, type="schedule.missed", severity="critical", title="Missed", body="",
+        fingerprint=fingerprint,
+    )
+
+    assert result is not None and result.id == existing.id
+    from sqlalchemy import func, select
+
+    assert await real_scalar(select(func.count()).select_from(NotificationEvent)) == 1
+
+
+@pytest.mark.asyncio
+async def test_read_receipts_are_private_to_each_user(session) -> None:
+    from test_runs import api_client
+
+    alice = User(id=new_id(), username="alice", role="viewer")
+    bob = User(id=new_id(), username="bob", role="viewer")
+    session.add_all([alice, bob])
+    await session.commit()
+    event = await publish(session, type="run.failed", severity="error", title="Wave failed", body="body")
+    assert event is not None
+
+    async with api_client(session, alice) as client:
+        assert (await client.get("/api/notifications/unread-count")).json()["count"] == 1
+        marked = await client.post(f"/api/notifications/{event.id}/read")
+        assert marked.status_code == 200
+        assert (await client.get("/api/notifications/unread-count")).json()["count"] == 0
+        assert (await client.get("/api/notifications")).json()["items"][0]["read"] is True
+
+    async with api_client(session, bob) as client:
+        assert (await client.get("/api/notifications/unread-count")).json()["count"] == 1
+        body = (await client.get("/api/notifications", params={"unread_only": "true"})).json()
+        assert body["unread"] == 1
+        assert body["items"][0]["read"] is False
+
+
+@pytest.mark.asyncio
+async def test_mark_all_is_idempotent_and_private_to_the_current_user(session) -> None:
+    from test_runs import api_client
+
+    alice = User(id=new_id(), username="alice-all", role="viewer")
+    bob = User(id=new_id(), username="bob-all", role="viewer")
+    session.add_all([alice, bob])
+    await session.commit()
+    await publish(session, type="run.failed", severity="error", title="First", body="")
+    await publish(session, type="run.failed", severity="error", title="Second", body="")
+
+    async with api_client(session, alice) as client:
+        first = await client.post("/api/notifications/read-all")
+        second = await client.post("/api/notifications/read-all")
+        assert first.json()["count"] == 2
+        assert second.json()["count"] == 0
+        assert (await client.get("/api/notifications/unread-count")).json()["count"] == 0
+
+    async with api_client(session, bob) as client:
+        assert (await client.get("/api/notifications/unread-count")).json()["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_startup_converts_legacy_global_read_flags_once(session) -> None:
+    from app.database import _backfill_notification_read_receipts
+    from app.models import NotificationEventRead
+
+    existing = User(id=new_id(), username="existing", role="viewer")
+    event = NotificationEvent(id=new_id(), type="run.failed", severity="error", title="Old", body="", read=True)
+    session.add_all([existing, event])
+    await session.commit()
+
+    await session.run_sync(lambda sync_session: _backfill_notification_read_receipts(sync_session.connection()))
+    await session.commit()
+    assert await session.get(NotificationEventRead, (event.id, existing.id)) is not None
+    await session.refresh(event)
+    assert event.read is False
+
+    later = User(id=new_id(), username="later", role="viewer")
+    session.add(later)
+    await session.commit()
+    await session.run_sync(lambda sync_session: _backfill_notification_read_receipts(sync_session.connection()))
+    await session.commit()
+    assert await session.get(NotificationEventRead, (event.id, later.id)) is None
 
 
 @pytest.mark.asyncio

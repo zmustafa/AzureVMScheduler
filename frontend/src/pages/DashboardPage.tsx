@@ -96,6 +96,15 @@ function KpiCard({ kpi }: { kpi: Kpi }) {
   </Link>
 }
 
+function KpiTile({ kpi }: { kpi: Kpi }) {
+  const Icon = kpi.icon
+  return <div className={`card block ${TONE_RING[kpi.tone]}`}>
+    <div className="flex items-start justify-between gap-2"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{kpi.label}</p><Icon size={18} className={TONE_TEXT[kpi.tone]} aria-hidden="true" /></div>
+    <div className="mt-2 flex items-end justify-between gap-2"><p className="text-2xl font-semibold tabular-nums text-slate-900">{kpi.value}</p>{kpi.trend && <Sparkline values={kpi.trend} tone={kpi.trendTone} label={`${kpi.label} trend`} />}</div>
+    <div className="mt-0.5 flex flex-wrap items-center gap-2"><p className="text-xs text-slate-500">{kpi.hint}</p>{kpi.delta && <DeltaBadge delta={kpi.delta} />}</div>
+  </div>
+}
+
 function UpcomingRow({ wave }: { wave: UpcomingSchedule }) {
   const { format } = useDisplayTimezone()
   const countdown = useCountdown(wave.next_run_at, wave.timezone)
@@ -212,7 +221,7 @@ const seconds = (value: number | null) => (value === null ? '—' : formatDurati
 const percent = (value: number | null) => (value === null ? '—' : `${Math.round(value * 100)}%`)
 
 /** Everything that will silently not happen, plus the machines that keep failing. */
-function AttentionPanel({ data }: { data: Overview }) {
+function AttentionPanel({ data, canReadGroups, canReadRuns, canReadSchedules, canReadVms }: { data: Overview; canReadGroups: boolean; canReadRuns: boolean; canReadSchedules: boolean; canReadVms: boolean }) {
   const { coverage, offenders } = data
   const { format } = useDisplayTimezone()
   const nothing = coverage.uncovered_vm_count === 0
@@ -231,7 +240,7 @@ function AttentionPanel({ data }: { data: Overview }) {
       <p className="text-xs text-slate-600">They will never be started or stopped automatically.</p>
       <ul className="mt-1.5 flex flex-wrap gap-1.5">
         {coverage.uncovered_sample.map((vm) => <li key={vm.id}><Chip title={vm.group_path}>{vm.vm_name}</Chip></li>)}
-        {coverage.uncovered_vm_count > coverage.uncovered_sample.length && <li><Link className="link text-xs" to="/vms">and {coverage.uncovered_vm_count - coverage.uncovered_sample.length} more</Link></li>}
+        {coverage.uncovered_vm_count > coverage.uncovered_sample.length && <li>{canReadVms ? <Link className="link text-xs" to="/vms">and {coverage.uncovered_vm_count - coverage.uncovered_sample.length} more</Link> : <span className="text-xs text-slate-500">and {coverage.uncovered_vm_count - coverage.uncovered_sample.length} more</span>}</li>}
       </ul>
     </div>}
 
@@ -241,7 +250,7 @@ function AttentionPanel({ data }: { data: Overview }) {
       <p className="text-xs text-slate-600">They keep billing until someone stops them by hand.</p>
       <ul className="mt-1.5 flex flex-wrap gap-1.5">
         {coverage.starts_but_never_stops_sample.map((vm) => <li key={vm.id}><Chip tone="warn" title={vm.group_path}>{vm.vm_name}</Chip></li>)}
-        {coverage.starts_but_never_stops > coverage.starts_but_never_stops_sample.length && <li><Link className="link text-xs" to="/schedules">and {coverage.starts_but_never_stops - coverage.starts_but_never_stops_sample.length} more</Link></li>}
+        {coverage.starts_but_never_stops > coverage.starts_but_never_stops_sample.length && <li>{canReadSchedules ? <Link className="link text-xs" to="/schedules">and {coverage.starts_but_never_stops - coverage.starts_but_never_stops_sample.length} more</Link> : <span className="text-xs text-slate-500">and {coverage.starts_but_never_stops - coverage.starts_but_never_stops_sample.length} more</span>}</li>}
       </ul>
     </div>}
 
@@ -251,21 +260,21 @@ function AttentionPanel({ data }: { data: Overview }) {
       <p className="text-xs text-slate-600">Once a stop wave runs, nothing brings them back automatically.</p>
       <ul className="mt-1.5 flex flex-wrap gap-1.5">
         {coverage.stops_but_never_starts_sample.map((vm) => <li key={vm.id}><Chip tone="danger" title={vm.group_path}>{vm.vm_name}</Chip></li>)}
-        {coverage.stops_but_never_starts > coverage.stops_but_never_starts_sample.length && <li><Link className="link text-xs" to="/schedules">and {coverage.stops_but_never_starts - coverage.stops_but_never_starts_sample.length} more</Link></li>}
+        {coverage.stops_but_never_starts > coverage.stops_but_never_starts_sample.length && <li>{canReadSchedules ? <Link className="link text-xs" to="/schedules">and {coverage.stops_but_never_starts - coverage.stops_but_never_starts_sample.length} more</Link> : <span className="text-xs text-slate-500">and {coverage.stops_but_never_starts - coverage.stops_but_never_starts_sample.length} more</span>}</li>}
       </ul>
     </div>}
 
     {coverage.applications_without_schedules.length > 0 && <div>
       <p className="text-sm font-semibold text-slate-900">{coverage.applications_without_schedules.length} application{coverage.applications_without_schedules.length === 1 ? ' has' : 's have'} no enabled schedule</p>
       <ul className="mt-1.5 flex flex-wrap gap-1.5">
-        {coverage.applications_without_schedules.map((app) => <li key={app.id}><Link to={`/applications/${app.id}`}><Chip tone="warn">{app.name} · {app.vm_count} VMs</Chip></Link></li>)}
+        {coverage.applications_without_schedules.map((app) => <li key={app.id}>{canReadGroups ? <Link to={`/applications/${app.id}`}><Chip tone="warn">{app.name} · {app.vm_count} VMs</Chip></Link> : <Chip tone="warn">{app.name} · {app.vm_count} VMs</Chip>}</li>)}
       </ul>
     </div>}
 
     {coverage.empty_schedules.length > 0 && <div>
       <p className="text-sm font-semibold text-slate-900">{coverage.empty_schedules.length} enabled schedule{coverage.empty_schedules.length === 1 ? '' : 's'} resolve to zero VMs</p>
       <ul className="mt-1.5 flex flex-wrap gap-1.5">
-        {coverage.empty_schedules.map((item) => <li key={item.id}><Link to={`/schedules/${item.id}`}><Chip tone="warn">{item.name} · {actionMeta(item.action).label}</Chip></Link></li>)}
+        {coverage.empty_schedules.map((item) => <li key={item.id}>{canReadSchedules ? <Link to={`/schedules/${item.id}`}><Chip tone="warn">{item.name} · {actionMeta(item.action).label}</Chip></Link> : <Chip tone="warn">{item.name} · {actionMeta(item.action).label}</Chip>}</li>)}
       </ul>
     </div>}
 
@@ -287,7 +296,7 @@ function AttentionPanel({ data }: { data: Overview }) {
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Chip tone="danger">{item.failures} failure{item.failures === 1 ? '' : 's'}</Chip>
-            {item.run_id && <Link className="link text-xs" to={`/runs/${item.run_id}`}>Last run</Link>}
+            {item.run_id && canReadRuns && <Link className="link text-xs" to={`/runs/${item.run_id}`}>Last run</Link>}
           </div>
         </li>)}
       </ul>
@@ -296,11 +305,11 @@ function AttentionPanel({ data }: { data: Overview }) {
 }
 
 /** A fresh install has nothing to show, so point at the first three things to do instead. */
-function Onboarding({ data }: { data: Overview }) {
+function Onboarding({ data, canManageConnections, canImport, canCreateSchedules }: { data: Overview; canManageConnections: boolean; canImport: boolean; canCreateSchedules: boolean }) {
   const steps = [
-    { done: false, label: 'Connect an Azure tenant', to: '/settings/tenants', hint: 'Store credentials encrypted on this host.' },
-    { done: data.estate.vm_count > 0, label: 'Add virtual machines', to: '/import', hint: 'Import a CSV or discover them from a tenant.' },
-    { done: data.estate.schedule_count > 0, label: 'Create a schedule', to: '/schedules', hint: 'Target an application or a single ring.' },
+    { done: false, label: 'Connect an Azure tenant', to: '/settings/tenants', allowed: canManageConnections, hint: 'Store credentials encrypted on this host.' },
+    { done: data.estate.vm_count > 0, label: 'Add virtual machines', to: '/import', allowed: canImport, hint: 'Import a CSV or discover them from a tenant.' },
+    { done: data.estate.schedule_count > 0, label: 'Create a schedule', to: '/schedules', allowed: canCreateSchedules, hint: 'Target an application or a single ring.' },
   ]
   return <div className="card">
     <h2 className="font-semibold text-slate-900">Get started</h2>
@@ -309,7 +318,7 @@ function Onboarding({ data }: { data: Overview }) {
       {steps.map((step, index) => <li key={step.label} className="flex items-center gap-3 rounded-lg border border-slate-200 p-3">
         <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${step.done ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'}`}>{step.done ? '✓' : index + 1}</span>
         <div className="min-w-0 flex-1">
-          <Link className="link font-medium" to={step.to}>{step.label}</Link>
+          {step.allowed ? <Link className="link font-medium" to={step.to}>{step.label}</Link> : <span className="font-medium text-slate-700">{step.label}</span>}
           <p className="text-xs text-slate-500">{step.hint}</p>
         </div>
       </li>)}
@@ -320,6 +329,13 @@ function Onboarding({ data }: { data: Overview }) {
 /** Enterprise operations overview: readiness, windowed metrics, the rollout plan and live activity. */
 export function DashboardPage() {
   const canRetry = useCan('schedules.write')
+  const canReadRuns = useCan('runs.read')
+  const canReadSchedules = useCan('schedules.read')
+  const canReadVms = useCan('vms.read')
+  const canManageConnections = useCan('connections.manage')
+  const canImport = useCan('imports.write')
+  const canManageUsers = useCan('users.manage')
+  const canReadGroups = useCan('groups.read')
   const client = useQueryClient()
   const navigate = useNavigate()
   const { format } = useDisplayTimezone()
@@ -344,6 +360,7 @@ export function DashboardPage() {
   const runs = useQuery({
     queryKey: ['runs', 'dashboard'],
     queryFn: () => api<Paged<ScheduleRun>>('/runs?limit=50'),
+    enabled: canReadRuns,
     refetchInterval: paused ? false : (query) => ((query.state.data?.items ?? []).some(isRunActive) ? ACTIVE_POLL_MS : IDLE_POLL_MS),
   })
   const busy = (runs.data?.items ?? []).some(isRunActive)
@@ -354,16 +371,18 @@ export function DashboardPage() {
     [window.from, window.to],
   )
   const overview = useQuery({ queryKey: ['overview', overviewPath], queryFn: () => api<Overview>(overviewPath), refetchInterval: poll, placeholderData: (previous) => previous })
-  const upcoming = useQuery({ queryKey: ['schedules', 'upcoming', 8], queryFn: () => api<UpcomingSchedule[]>('/schedules/upcoming?limit=8'), refetchInterval: poll })
+  const upcoming = useQuery({ queryKey: ['schedules', 'upcoming', 8], queryFn: () => api<UpcomingSchedule[]>('/schedules/upcoming?limit=8'), enabled: canReadSchedules, refetchInterval: poll })
   const timeline = useQuery({
     queryKey: ['timeline', 'dashboard', anchor],
     queryFn: () => api<TimelineBlock[]>(`/timeline?from=${new Date(anchor).toISOString()}&to=${new Date(anchor + 24 * 3_600_000).toISOString()}`),
+    enabled: canReadSchedules,
     refetchInterval: poll,
     placeholderData: (previous) => previous,
   })
   const activity = useQuery({
     queryKey: ['runs-activity', 'dashboard', overviewPath],
     queryFn: () => api<ActivityResponse>(`/runs/activity?from=${encodeURIComponent(new Date(window.from).toISOString())}&to=${encodeURIComponent(new Date(window.to).toISOString())}&limit=40`),
+    enabled: canReadRuns,
     refetchInterval: poll,
     placeholderData: (previous) => previous,
   })
@@ -388,6 +407,13 @@ export function DashboardPage() {
   const power = data?.power
   const powerTotal = power ? Object.values(power.counts).reduce((sum, value) => sum + value, 0) : 0
   const isFresh = !!data && data.estate.vm_count === 0 && data.estate.schedule_count === 0
+  const canOpen = (to: string) => to.startsWith('/runs') ? canReadRuns
+    : to.startsWith('/schedules') ? canReadSchedules
+      : to.startsWith('/applications') ? canReadGroups
+        : to.startsWith('/vms') ? canReadVms
+          : to.startsWith('/settings/tenants') ? canManageConnections
+            : to.startsWith('/settings/access') ? canManageUsers
+              : to.startsWith('/settings')
 
   return <>
     <PageHeader
@@ -402,22 +428,22 @@ export function DashboardPage() {
           title={paused ? 'Resume automatic refresh' : 'Pause automatic refresh'}
           onClick={() => setPaused(!paused)}
         >{paused ? <Play size={15} /> : <Pause size={15} />}{paused ? 'Paused' : 'Live'}</button>
-        <Link className="btn-primary" to="/schedules">Create schedule</Link>
+        {canRetry && canReadSchedules && <Link className="btn-primary" to="/schedules">Create schedule</Link>}
       </div>}
     />
 
     {retry.error && <div className="mb-4"><ErrorNotice error={retry.error} /></div>}
 
-    <ReadinessStrip checks={data?.readiness ?? []} loading={overview.isLoading} />
+    <ReadinessStrip checks={data?.readiness ?? []} loading={overview.isLoading} canOpen={canOpen} />
 
-    {isFresh ? <Onboarding data={data!} /> : <>
+    {isFresh ? <Onboarding data={data!} canManageConnections={canManageConnections} canImport={canImport} canCreateSchedules={canRetry && canReadSchedules} /> : <>
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {overview.isLoading || !data
           ? Array.from({ length: 8 }).map((_, index) => <div className="card" key={index}><Skeleton className="h-3 w-24" /><Skeleton className="mt-3 h-7 w-16" /><Skeleton className="mt-2 h-3 w-20" /></div>)
-          : kpisFor(data).map((kpi) => <KpiCard key={kpi.label} kpi={kpi} />)}
+          : kpisFor(data).map((kpi) => canOpen(kpi.to) ? <KpiCard key={kpi.label} kpi={kpi} /> : <KpiTile key={kpi.label} kpi={kpi} />)}
       </div>
 
-      {data && <section className="card mt-6">
+      {data && canReadSchedules && <section className="card mt-6">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div><h2 className="font-semibold text-slate-900">Next 24 hours</h2><p className="muted">Every planned wave, sized by how many machines it acts on.</p></div>
           <Link className="link text-sm" to="/timeline">Open timeline</Link>
@@ -429,16 +455,16 @@ export function DashboardPage() {
           a full "Next starts"), and grid rows are as tall as their tallest cell, which left a large
           void under the short one. Column flow packs them tightly. */}
       <div className="mt-6 xl:columns-2 xl:gap-6">
-        <Panel title="Rollout plan" description="Each application's rings in the order they will start." action={<Link className="link text-sm" to="/schedules">Schedules</Link>}>
-          {overview.isLoading || !data ? <TableSkeleton rows={4} columns={2} /> : <RolloutPlanPanel plans={data.rollout_plan} />}
+        <Panel title="Rollout plan" description="Each application's waves in the order they will execute." action={canReadSchedules ? <Link className="link text-sm" to="/schedules">Schedules</Link> : undefined}>
+          {overview.isLoading || !data ? <TableSkeleton rows={4} columns={2} /> : <RolloutPlanPanel plans={data.rollout_plan} canOpenApplications={canReadGroups} canOpenSchedules={canReadSchedules} />}
         </Panel>
 
         <Panel title="Needs attention" description="Coverage gaps in both directions, and what keeps failing.">
-          {overview.isLoading || !data ? <TableSkeleton rows={4} columns={2} /> : <AttentionPanel data={data} />}
+          {overview.isLoading || !data ? <TableSkeleton rows={4} columns={2} /> : <AttentionPanel data={data} canReadGroups={canReadGroups} canReadRuns={canReadRuns} canReadSchedules={canReadSchedules} canReadVms={canReadVms} />}
         </Panel>
 
         <Panel title="Application health" description="One cell per wave in this window, newest on the right.">
-          {overview.isLoading || !data ? <TableSkeleton rows={4} columns={2} /> : <HealthMatrix applications={data.applications} pinned={pinned} onTogglePin={togglePin} />}
+          {overview.isLoading || !data ? <TableSkeleton rows={4} columns={2} /> : <HealthMatrix applications={data.applications} pinned={pinned} onTogglePin={togglePin} canOpenApplications={canReadGroups} canOpenRuns={canReadRuns} />}
         </Panel>
 
         {data && <Panel title="Reliability" description="How dependable the last waves were.">
@@ -453,7 +479,7 @@ export function DashboardPage() {
           {power && <div className="mt-4 border-t border-slate-100 pt-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Power state</p>
             {powerTotal === 0
-              ? <p className="mt-1 text-sm text-slate-600">No virtual machine has been scanned yet. <Link className="link" to="/vms">Scan the inventory</Link> to see live state here.</p>
+              ? <p className="mt-1 text-sm text-slate-600">No virtual machine has been scanned yet.{canReadVms && <> <Link className="link" to="/vms">Scan the inventory</Link> to see live state here.</>}</p>
               : <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                 {Object.entries(power.counts).map(([state, count]) => <Chip key={state} tone={state === 'running' ? 'success' : 'neutral'}>{count} {state}</Chip>)}
                 {power.never_scanned > 0 && <Chip tone="warn">{power.never_scanned} never scanned</Chip>}
@@ -462,32 +488,32 @@ export function DashboardPage() {
           </div>}
         </Panel>}
 
-        <Panel title="Live runs" description="Runs that have not finished yet." action={<Link className="link text-sm" to="/runs">All runs</Link>}>
+        {canReadRuns && <Panel title="Live runs" description="Runs that have not finished yet." action={<Link className="link text-sm" to="/runs">All runs</Link>}>
           {runs.isLoading ? <TableSkeleton rows={3} columns={2} /> : runs.error ? <ErrorNotice error={runs.error} /> : live.length
             ? <ul className="space-y-2">{live.map((run) => <LiveRunRow key={run.id} run={run} />)}</ul>
-            : <p className="py-8 text-center muted">Nothing is starting right now.</p>}
-        </Panel>
+            : <p className="py-8 text-center muted">No wave is running right now.</p>}
+        </Panel>}
 
-        <Panel title="Next starts" description="Upcoming waves with a live countdown." action={<Link className="link text-sm" to="/timeline">Timeline</Link>}>
+        {canReadSchedules && <Panel title="Next waves" description="Upcoming start and stop waves with a live countdown." action={<Link className="link text-sm" to="/timeline">Timeline</Link>}>
           {upcoming.isLoading ? <TableSkeleton rows={4} columns={2} /> : upcoming.error ? <ErrorNotice error={upcoming.error} /> : upcoming.data?.length
             ? <ul className="space-y-2">{upcoming.data.slice(0, 5).map((wave) => <UpcomingRow key={wave.schedule_id} wave={wave} />)}</ul>
-            : <p className="py-8 text-center muted">No enabled schedule has a next start.</p>}
-        </Panel>
+            : <p className="py-8 text-center muted">No enabled schedule has a next occurrence.</p>}
+        </Panel>}
 
-        <Panel title="Recent runs" description="The last waves the scheduler or an operator triggered.">
+        {canReadRuns && <Panel title="Recent runs" description="The last waves the scheduler or an operator triggered.">
           {runs.isLoading ? <TableSkeleton rows={4} columns={3} /> : recent.length
             ? <ul className="divide-y divide-slate-200">{recent.map((run) => <RecentRunRow key={run.id} run={run} canRetry={canRetry} retrying={retry.isPending} onRetry={retry.mutate} />)}</ul>
             : <p className="py-8 text-center muted">No run history yet. Trigger a schedule to create the first run.</p>}
-        </Panel>
+        </Panel>}
 
-        <Panel title="Recent failures" description="Runs where at least one virtual machine did not start.">
+        {canReadRuns && <Panel title="Recent failures" description="Runs where at least one virtual machine did not start.">
           {runs.isLoading ? <TableSkeleton rows={4} columns={3} /> : failures.length
             ? <ul className="divide-y divide-slate-200">{failures.map((run) => <RecentRunRow key={run.id} run={run} canRetry={canRetry} retrying={retry.isPending} onRetry={retry.mutate} />)}</ul>
             : <p className="flex items-center justify-center gap-2 py-8 text-center muted"><Play size={15} aria-hidden="true" />No failed runs recorded.</p>}
-        </Panel>
+        </Panel>}
       </div>
 
-      <section className="card mt-6">
+      {canReadRuns && <section className="card mt-6">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div><h2 className="font-semibold text-slate-900">Activity</h2><p className="muted">Wave and per-machine events in this window.</p></div>
           <Link className="link text-sm" to="/runs">Full log</Link>
@@ -501,7 +527,7 @@ export function DashboardPage() {
           </li>)}
           {(activity.data?.events ?? []).length === 0 && <li className="py-6 text-center muted">No activity in this window.</li>}
         </ul>
-      </section>
+      </section>}
     </>}
 
     {data && <p className="mt-4 text-center text-xs text-slate-500">

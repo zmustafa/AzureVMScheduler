@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router'
 import { Activity } from 'lucide-react'
 import { api } from '../api'
+import { useCan } from '../auth'
 import { useDisplayTimezone, useTick, serverNow } from '../lib/time'
 import { useScheduleIndex } from '../lib/queries'
 import { DEFAULT_RANGE, resolveRange, type TimeRange } from '../lib/timeRange'
@@ -24,8 +25,8 @@ function triggeredBy(run: ScheduleRun): string {
   return run.triggered_by ? `Manual · ${run.triggered_by}` : 'Manual'
 }
 
-function useZoneFor(): (run: ScheduleRun) => string | undefined {
-  const index = useScheduleIndex()
+function useZoneFor(canReadSchedules: boolean): (run: ScheduleRun) => string | undefined {
+  const index = useScheduleIndex(canReadSchedules)
   return useMemo(() => {
     const zones = new Map<string, string>((index.data?.items ?? []).map((item) => [item.id, item.timezone]))
     return (run: ScheduleRun) => (run.schedule_id ? zones.get(run.schedule_id) : undefined)
@@ -57,6 +58,7 @@ function RunCard({ run, zone }: { run: ScheduleRun; zone?: string }) {
 
 /** Paged run history over a chosen time window, with an activity timeline and detailed log. */
 export function RunsPage() {
+  const canReadSchedules = useCan('schedules.read')
   const [params, setParams] = useSearchParams()
   const [status, setStatus] = useState(params.get('status') ?? '')
   const [trigger, setTrigger] = useState(params.get('trigger') ?? '')
@@ -65,7 +67,7 @@ export function RunsPage() {
   const [range, setRange] = useState<TimeRange>(DEFAULT_RANGE)
   const [selection, setSelection] = useState<Selection | null>(null)
   const [offset, setOffset] = useState(0)
-  const zoneFor = useZoneFor()
+  const zoneFor = useZoneFor(canReadSchedules)
   const { sort, toggle, params: sortParams } = useSort({ key: 'created_at', direction: 'desc' }, ['created_at', 'scheduled_for', 'started_at'])
 
   // Rolling windows follow the clock, but only in 30s steps so query keys stay stable.
@@ -129,7 +131,7 @@ export function RunsPage() {
   const filtered = !!(mode || query.trim() || narrowed)
 
   return <>
-    <PageHeader title="Runs" description="Every scheduled and manual start wave, with per-VM outcomes." />
+    <PageHeader title="Runs" description="Every scheduled and manual start or stop wave, with per-VM outcomes." />
 
     <div className="mb-4 flex flex-wrap items-center gap-3">
       <SearchInput value={query} onChange={setQuery} placeholder="Search by schedule" label="Search runs by schedule name" />

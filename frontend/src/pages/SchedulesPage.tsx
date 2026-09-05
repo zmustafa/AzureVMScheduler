@@ -29,8 +29,10 @@ function NextRunCell({ schedule }: { schedule: Schedule }) {
 /** Schedule list for the group/VM targeting model. */
 export function SchedulesPage() {
   const canWrite = useCan('schedules.write')
+  const canReadGroups = useCan('groups.read')
+  const canReadVms = useCan('vms.read')
   const connections = useConnections()
-  const tree = useGroupTree()
+  const tree = useGroupTree(canReadGroups)
   const [query, setQuery] = useState('')
   const [action, setAction] = useState('')
   const [targetType, setTargetType] = useState('')
@@ -57,7 +59,8 @@ export function SchedulesPage() {
   const rows = useMemo(() => (list.data?.items ?? []).filter((item) => (targetType ? item.target_type === targetType : true)), [list.data, targetType])
 
   const vmCountFor = (schedule: Schedule) => schedule.vm_count ?? (schedule.target_type === 'vm' ? 1 : findGroup(tree.data ?? [], schedule.target_id)?.subtree_vm_count ?? 0)
-  const newButton = canWrite ? <button type="button" className="btn-primary" onClick={() => setCreating(true)}><Plus size={16} />New schedule</button> : undefined
+  const canCreate = canWrite && canReadGroups && canReadVms
+  const newButton = canCreate ? <button type="button" className="btn-primary" onClick={() => setCreating(true)}><Plus size={16} />New schedule</button> : undefined
 
   return <>
     <PageHeader title="Schedules" description="Daily, weekly or cron waves that start or stop a group (application or ring) or a single virtual machine." action={newButton} />
@@ -142,6 +145,6 @@ export function SchedulesPage() {
       <div className="surface mt-3"><Pagination total={list.data?.total ?? 0} limit={LIMIT} offset={offset} onChange={setOffset} /></div>
     </>}
 
-    <ScheduleDrawer open={creating} onClose={() => setCreating(false)} />
+    {canCreate && <ScheduleDrawer open={creating} onClose={() => setCreating(false)} />}
   </>
 }

@@ -371,5 +371,8 @@ async def get_vm_adapter(connection_id: str | None, action: str = "start"):
     connection = await get_connection(connection_id)
     if mode == "mock":
         return MockVmAdapter(), connection or {}, "mock"
+    if not connection:
+        # The file-backed registry can change between the policy check and credential load.
+        raise ValueError("The selected Azure connection no longer exists")
     token, credential = await arm_token(connection)
     return ArmVmAdapter(token, credential), connection, "real"

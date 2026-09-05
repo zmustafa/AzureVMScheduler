@@ -23,9 +23,10 @@ type Destination = 'existing' | 'new'
 export function LocateVmsPage() {
   const canWriteGroups = useCan('groups.write')
   const canWriteVms = useCan('vms.write')
+  const canReadGroups = useCan('groups.read')
   const client = useQueryClient()
   const navigate = useNavigate()
-  const tree = useGroupTree()
+  const tree = useGroupTree(canReadGroups)
   const connections = useConnections()
 
   const [text, setText] = useState('')

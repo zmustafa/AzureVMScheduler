@@ -62,6 +62,7 @@ async def initialize_database() -> None:
         await connection.run_sync(Base.metadata.create_all)
         await connection.run_sync(_add_missing_columns)
         await connection.run_sync(_backfill_legacy_sqlite_data)
+        await connection.run_sync(_backfill_notification_read_receipts)
 
 
 def _add_missing_columns(connection) -> None:
@@ -95,3 +96,23 @@ def _backfill_legacy_sqlite_data(connection) -> None:
 
     copy_legacy_attempts(connection)
     backfill_hierarchy(connection)
+
+
+def _backfill_notification_read_receipts(connection) -> None:
+    """Convert the retired global read bit when startup, rather than Alembic, upgrades a database."""
+    if connection.dialect.name == "postgresql":
+        connection.exec_driver_sql(
+            "INSERT INTO notification_event_reads (event_id, user_id, read_at) "
+            "SELECT notification_events.id, users.id, CURRENT_TIMESTAMP "
+            "FROM notification_events CROSS JOIN users WHERE notification_events.read = true "
+            "ON CONFLICT (event_id, user_id) DO NOTHING"
+        )
+    else:
+        connection.exec_driver_sql(
+            "INSERT OR IGNORE INTO notification_event_reads (event_id, user_id, read_at) "
+            "SELECT notification_events.id, users.id, CURRENT_TIMESTAMP "
+            "FROM notification_events CROSS JOIN users WHERE notification_events.read = 1"
+        )
+    # Makes the conversion one-shot. A user created later must not inherit somebody else's old
+    # acknowledgement merely because the application restarted.
+    connection.exec_driver_sql("UPDATE notification_events SET read = false WHERE read = true")

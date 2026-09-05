@@ -341,7 +341,8 @@ async def _publish_attempt_event(session: AsyncSession, attempt: VmAttempt) -> N
         "run_url": run_url(attempt.run_id),
         "error": attempt.message,
     }
-    await publish(session, type=event_type, severity=severity, title=f"{vm_name} {attempt.status.replace('_', ' ')}", body=attempt.message or f"The start attempt for {vm_name} ended as {attempt.status}.", facts=facts, schedule_id=attempt.schedule_id, run_id=attempt.run_id, vm_id=attempt.vm_id, group_id=group_id, connection_id=attempt.connection_id)
+    action = attempt.action or "start"
+    await publish(session, type=event_type, severity=severity, title=f"{vm_name} {attempt.status.replace('_', ' ')}", body=attempt.message or f"The {action} attempt for {vm_name} ended as {attempt.status}.", facts=facts, schedule_id=attempt.schedule_id, run_id=attempt.run_id, vm_id=attempt.vm_id, group_id=group_id, connection_id=attempt.connection_id)
 
 
 async def detect_missed_runs(session: AsyncSession, now: datetime | None = None) -> list[str]:

@@ -28,7 +28,7 @@ const nav: NavItem[] = [
   {
     label: 'Settings', to: '/settings', icon: Settings, permission: null, children: [
       { label: 'General', to: '/settings', icon: SlidersHorizontal, permission: null },
-      { label: 'Azure Tenants', to: '/settings/tenants', icon: Cloud, permission: '*' },
+      { label: 'Azure Tenants', to: '/settings/tenants', icon: Cloud, permission: 'connections.manage' },
       { label: 'Connectors', to: '/settings/connectors', icon: Plug, permission: 'connectors.read' },
       { label: 'Notifications', to: '/settings/notifications', icon: BellRing, permission: 'notifications.read' },
       { label: 'Access control', to: '/settings/access', icon: ShieldCheck, permission: 'users.manage' },

@@ -105,8 +105,9 @@ function RowCard({ row }: { row: ImportRow }) {
 export function ImportPage() {
   const client = useQueryClient()
   const canImport = useCan('imports.write')
+  const canReadGroups = useCan('groups.read')
   const connections = useConnections()
-  const groupTree = useGroupTree()
+  const groupTree = useGroupTree(canReadGroups)
   const [preview, setPreview] = useState<ImportPreview>()
   const [result, setResult] = useState<string>()
   const [invalidOnly, setInvalidOnly] = useState(false)
@@ -169,12 +170,12 @@ export function ImportPage() {
               {connections.data?.filter((item) => !item.disabled).map((item) => <option key={item.id} value={item.id}>{connectionOptionLabel(item)}</option>)}
             </select>
           </Field>
-          <Field label="Destination when the file has no application column" hint="Rows without an application land here. Rows that name one are unaffected.">
+          {canReadGroups && <Field label="Destination when the file has no application column" hint="Rows without an application land here. Rows that name one are unaffected.">
             <select value={destinationId} onChange={(event) => setDestinationId(event.target.value)} disabled={!canImport}>
               <option value="">Use the application column</option>
               {groups.map((item) => <option key={item.id} value={item.id}>{'\u00a0'.repeat(item.depth * 2)}{item.name_path}</option>)}
             </select>
-          </Field>
+          </Field>}
         </div>
       </form>
       {!canImport && <p className="mt-3 text-sm text-amber-800">You need the <code className="font-mono">imports.write</code> permission to upload a CSV.</p>}

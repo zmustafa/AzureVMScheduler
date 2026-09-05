@@ -3,7 +3,6 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
 import { CalendarRange, ChevronLeft, ChevronRight, ListTree } from 'lucide-react'
 import { api } from '../api'
-import { useScheduleIndex } from '../lib/queries'
 import { actionMeta } from '../lib/actions'
 import { ActionBadge } from '../components/ActionBits'
 import { countdownText, serverNow, useDisplayTimezone, useTick, zoneLabel } from '../lib/time'
@@ -60,7 +59,7 @@ function BlockTip({ block, zone, axisZone }: { block: TimelineBlock; zone?: stri
   </div>
 }
 
-/** Horizontal band of upcoming start waves, grouped by application / ring path. */
+/** Horizontal band of upcoming waves, grouped by application / ring path. */
 export function TimelinePage() {
   const { resolve } = useDisplayTimezone()
   const axisZone = resolve(null)
@@ -73,11 +72,6 @@ export function TimelinePage() {
 
   const path = `/timeline?from=${encodeURIComponent(new Date(windowStart).toISOString())}&to=${encodeURIComponent(new Date(windowEnd).toISOString())}`
   const list = useQuery({ queryKey: ['timeline', path], queryFn: () => api<TimelineBlock[]>(path), refetchInterval: 60_000 })
-  const scheduleIndex = useScheduleIndex()
-  const zoneFor = useMemo(() => {
-    const zones = new Map((scheduleIndex.data?.items ?? []).map((item) => [item.id, item.timezone]))
-    return (block: TimelineBlock) => zones.get(block.schedule_id)
-  }, [scheduleIndex.data])
 
   const rows = useMemo(() => {
     const grouped = new Map<string, TimelineBlock[]>()
@@ -105,7 +99,7 @@ export function TimelinePage() {
   return <>
     <PageHeader
       title="Timeline"
-      description={`Start waves plotted in ${axisZone} (${zoneLabel(axisZone)}). Switch the display timezone in the header to re-plot.`}
+      description={`Start and stop waves plotted in ${axisZone} (${zoneLabel(axisZone)}). Switch the display timezone in the header to re-plot.`}
       action={<div className="flex items-center gap-2">
         <div className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5" role="group" aria-label="Timeline span">
           {(['day', 'week'] as Span[]).map((item) => <button
@@ -128,7 +122,7 @@ export function TimelinePage() {
 
     {list.isLoading ? <TableSkeleton rows={5} columns={3} /> : rows.length === 0 ? <EmptyState
       icon={<ListTree size={22} />}
-      title="No start waves in this window"
+      title="No waves in this window"
       description="Enable a schedule, or move to another day, to see its waves plotted here."
     /> : <div className="surface overflow-x-auto">
       <div className="min-w-[52rem]">
@@ -151,7 +145,7 @@ export function TimelinePage() {
             {blocks.map((block) => {
               const left = Math.max(position(block.start), 0)
               const width = Math.max(position(block.end) - left, 1.5)
-              const zone = zoneFor(block)
+              const zone = block.timezone
               const meta = actionMeta(block.action)
               const Icon = meta.icon
               return <Link

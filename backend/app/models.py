@@ -441,6 +441,18 @@ class NotificationEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class NotificationEventRead(Base):
+    """Per-user acknowledgement; one viewer must not clear everyone else's unread badge."""
+
+    __tablename__ = "notification_event_reads"
+
+    event_id: Mapped[str] = mapped_column(ForeignKey("notification_events.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (Index("ix_notification_event_reads_user_event", "user_id", "event_id"),)
+
+
 class NotificationDelivery(Base):
     __tablename__ = "notification_deliveries"
 

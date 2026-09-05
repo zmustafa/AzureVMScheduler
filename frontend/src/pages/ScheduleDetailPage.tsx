@@ -21,7 +21,10 @@ export function ScheduleDetailPage() {
   const navigate = useNavigate()
   const client = useQueryClient()
   const canWrite = useCan('schedules.write')
-  const tree = useGroupTree()
+  const canReadGroups = useCan('groups.read')
+  const canReadVms = useCan('vms.read')
+  const canReadRuns = useCan('runs.read')
+  const tree = useGroupTree(canReadGroups)
   const { format, localZone } = useDisplayTimezone()
 
   const query = useQuery({ queryKey: ['schedule', id], queryFn: () => api<ScheduleDetail>(`/schedules/${id}`), enabled: !!id })
@@ -47,6 +50,7 @@ export function ScheduleDetailPage() {
   if (query.error || !query.data) return <ErrorNotice error={query.error ?? new Error('Schedule not found')} />
 
   const { schedule, vms, attempts, runs } = query.data
+  const vmCount = schedule.vm_count ?? vms.length
 
   return <>
     <Link to="/schedules" className="mb-4 inline-flex items-center gap-2 text-sm text-slate-600 hover:text-blue-700"><ArrowLeft size={16} />Schedules</Link>
@@ -69,7 +73,7 @@ export function ScheduleDetailPage() {
       <div><p className="muted">Next occurrence · UTC</p><p className="mt-1 text-sm font-medium text-slate-800">{formatInZone(schedule.next_run_at, 'UTC')}</p></div>
       <div className="sm:col-span-3 flex flex-wrap items-center gap-2 border-t border-slate-200 pt-3">
         <Chip tone="neutral" icon={schedule.target_type === 'group' ? <Layers size={13} /> : <Server size={13} />}>{schedule.target_label ?? schedule.target_id}</Chip>
-        <Chip tone="neutral">{vms.length} VM{vms.length === 1 ? '' : 's'} resolved</Chip>
+        <Chip tone="neutral">{vmCount} VM{vmCount === 1 ? '' : 's'} resolved</Chip>
         <Chip tone="neutral">Stagger {schedule.stagger_seconds}s</Chip>
         {recurrenceBounds(schedule) && <Chip tone="info">{recurrenceBounds(schedule)}</Chip>}
         <Chip tone="neutral">{connectionLabel(schedule.connection_name, schedule.connection_tenant_id)}</Chip>
@@ -80,14 +84,14 @@ export function ScheduleDetailPage() {
       <section className="card space-y-4">
         <div><h2 className="font-semibold text-slate-900">Configuration</h2><p className="muted">Changes apply to the next occurrence.</p></div>
         {save.error && <ErrorNotice error={save.error} />}
-        {form && <ScheduleFields value={form} onChange={setForm} tree={tree.data ?? []} />}
+        {form && <ScheduleFields value={form} onChange={setForm} tree={tree.data ?? []} lockTarget={!canWrite || !canReadGroups || !canReadVms} />}
         <div className="flex justify-between gap-3 border-t border-slate-200 pt-4">
           {canWrite && <button type="button" className="btn-danger" onClick={() => setConfirmDelete(true)}><Trash2 size={16} />Delete</button>}
           {canWrite && <button type="button" className="btn-primary" disabled={save.isPending || !form} onClick={() => save.mutate()}><Save size={16} />{save.isPending ? 'Saving…' : 'Save changes'}</button>}
         </div>
       </section>
 
-      <div className="space-y-6">
+      {canReadRuns && <div className="space-y-6">
         <section className="card">
           <h2 className="font-semibold text-slate-900">Recent runs</h2>
           <div className="mt-3 divide-y divide-slate-200">
@@ -123,11 +127,11 @@ export function ScheduleDetailPage() {
             </article>) : <p className="py-8 text-center muted">No attempts yet.</p>}
           </div>
         </section>
-      </div>
+      </div>}
     </div>
 
     <ConfirmDialog open={confirmRun} tone={schedule.action === 'stop' ? 'danger' : 'primary'} title={`${actionMeta(schedule.action).label} virtual machines now`} confirmLabel="Run now" busy={run.isPending} onCancel={() => setConfirmRun(false)} onConfirm={() => run.mutate()}>
-      <p>This will {actionSentence(schedule.action, schedule.stop_mode, vms.length)} for <strong>{schedule.target_label ?? schedule.target_id}</strong>.</p>
+      <p>This will {actionSentence(schedule.action, schedule.stop_mode, vmCount)} for <strong>{schedule.target_label ?? schedule.target_id}</strong>.</p>
       <p className="mt-2">Tenant: <strong>{connectionLabel(schedule.connection_name, schedule.connection_tenant_id)}</strong>.</p>
     </ConfirmDialog>
     <ConfirmDialog open={confirmDelete} title="Delete schedule" confirmLabel="Delete schedule" busy={remove.isPending} onCancel={() => setConfirmDelete(false)} onConfirm={() => remove.mutate()}>

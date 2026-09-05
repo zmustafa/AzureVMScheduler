@@ -71,8 +71,8 @@ export function subtreeIds(node: GroupNode): Set<string> {
   return ids
 }
 
-export function useGroupTree() {
-  return useQuery({ queryKey: ['groups', 'tree'], queryFn: () => api<GroupNode[]>('/groups?shape=tree') })
+export function useGroupTree(enabled = true) {
+  return useQuery({ queryKey: ['groups', 'tree'], queryFn: () => api<GroupNode[]>('/groups?shape=tree'), enabled })
 }
 
 export function useConnections() {
@@ -84,9 +84,10 @@ export function useGeneralSettings() {
 }
 
 /** Every schedule, keyed for quick target lookups on the applications board. */
-export function useScheduleIndex() {
+export function useScheduleIndex(enabled = true) {
   return useQuery({
     queryKey: ['schedules', 'index'],
+    enabled,
     queryFn: async () => {
       const page = await api<Paged<Schedule>>('/schedules?limit=1000')
       const byTarget = new Map<string, Schedule[]>()
@@ -101,9 +102,10 @@ export function useScheduleIndex() {
 }
 
 /** Latest run per schedule, used for "last run" chips. */
-export function useLatestRuns() {
+export function useLatestRuns(enabled = true) {
   return useQuery({
     queryKey: ['runs', 'latest'],
+    enabled,
     queryFn: async () => {
       const page = await api<Paged<ScheduleRun>>('/runs?limit=200')
       const bySchedule = new Map<string, ScheduleRun>()
@@ -115,10 +117,11 @@ export function useLatestRuns() {
   })
 }
 
-export function staggerHint(vmCount: number, staggerSeconds: number): string {
+export function staggerHint(vmCount: number, staggerSeconds: number, action: 'start' | 'stop' = 'start'): string {
   if (!vmCount) return 'No virtual machines resolve to this target yet.'
-  if (staggerSeconds <= 0) return `${vmCount} VM${vmCount === 1 ? '' : 's'} start together.`
+  const verb = action === 'stop' ? 'stop' : 'start'
+  if (staggerSeconds <= 0) return `${vmCount} VM${vmCount === 1 ? '' : 's'} ${verb} together.`
   const spreadSeconds = staggerSeconds * Math.max(vmCount - 1, 0)
   const spread = spreadSeconds >= 60 ? `~${Math.round(spreadSeconds / 60)} min` : `~${spreadSeconds}s`
-  return `${vmCount} VM${vmCount === 1 ? '' : 's'} over ${spread}`
+  return `${vmCount} VM${vmCount === 1 ? '' : 's'} ${verb} over ${spread}`
 }

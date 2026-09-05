@@ -8,6 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .connectors.base import SEVERITY_RANK, severity_of
@@ -15,7 +16,7 @@ from .connectors.registry import list_connectors
 from .database import SessionLocal
 from .delivery import delivery_service
 from .hierarchy import GroupTree, load_tree
-from .models import NotificationDelivery, NotificationEvent, NotificationRule, new_id, utcnow
+from .models import NotificationDelivery, NotificationEvent, NotificationEventRead, NotificationRule, new_id, utcnow
 
 
 logger = logging.getLogger(__name__)
@@ -172,8 +173,20 @@ async def publish(
         connection_id=connection_id,
         fingerprint=fingerprint,
     )
-    db.add(event)
-    await db.flush()
+    try:
+        # The pre-check is the cheap common path, but another scheduler can commit the same
+        # fingerprint between that SELECT and this INSERT. Keep the unique constraint as the
+        # authority and contain a losing insert inside a savepoint so the caller's transaction
+        # remains usable.
+        async with db.begin_nested():
+            db.add(event)
+            await db.flush()
+    except IntegrityError:
+        if fingerprint:
+            existing = await db.scalar(select(NotificationEvent).where(NotificationEvent.fingerprint == fingerprint))
+            if existing:
+                return existing
+        raise
 
     rules = list((await db.scalars(select(NotificationRule).where(NotificationRule.enabled.is_(True)))).all())
     candidates = [rule for rule in rules if delivers_immediately(rule, type)]
@@ -288,5 +301,42 @@ async def run_daily_digests(db: AsyncSession, now: datetime | None = None) -> li
     return queued
 
 
-async def unread_count(db: AsyncSession) -> int:
-    return int(await db.scalar(select(func.count()).select_from(NotificationEvent).where(NotificationEvent.read.is_(False))) or 0)
+def read_receipt_exists(user_id: str):
+    return select(NotificationEventRead.event_id).where(
+        NotificationEventRead.user_id == user_id,
+        NotificationEventRead.event_id == NotificationEvent.id,
+    ).exists()
+
+
+async def unread_count(db: AsyncSession, user_id: str) -> int:
+    """Unread events for one account, independent of every other viewer."""
+    return int(await db.scalar(
+        select(func.count()).select_from(NotificationEvent).where(~read_receipt_exists(user_id))
+    ) or 0)
+
+
+async def read_event_ids(db: AsyncSession, user_id: str, event_ids: list[str]) -> set[str]:
+    if not event_ids:
+        return set()
+    return set((await db.scalars(select(NotificationEventRead.event_id).where(
+        NotificationEventRead.user_id == user_id,
+        NotificationEventRead.event_id.in_(event_ids),
+    ))).all())
+
+
+async def mark_events_read(db: AsyncSession, user_id: str, event_ids: list[str]) -> int:
+    """Insert read receipts idempotently on both supported database dialects."""
+    unique = list(dict.fromkeys(event_ids))
+    if not unique:
+        return 0
+    values = [{"event_id": event_id, "user_id": user_id, "read_at": utcnow()} for event_id in unique]
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    else:
+        from sqlalchemy.dialects.sqlite import insert
+    statement = insert(NotificationEventRead).values(values).on_conflict_do_nothing(
+        index_elements=[NotificationEventRead.event_id, NotificationEventRead.user_id]
+    )
+    result = await db.execute(statement)
+    return max(int(getattr(result, "rowcount", 0) or 0), 0)

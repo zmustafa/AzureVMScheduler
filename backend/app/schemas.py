@@ -36,6 +36,15 @@ def validate_role(value: str) -> str:
 #: Nothing legitimate is longer, and an unbounded credential field means an attacker can make the
 #: server buffer and Argon2-compare a multi-megabyte string on an unauthenticated endpoint.
 _CREDENTIAL_MAX = 512
+_LONG_TEXT_MAX = 4000
+_CERTIFICATE_MAX = 100_000
+
+
+def reject_null(value: Any) -> Any:
+    """PATCH fields backed by non-null columns must not turn explicit JSON null into a 500."""
+    if value is None:
+        raise ValueError("field may not be null")
+    return value
 
 
 class LoginRequest(BaseModel):
@@ -107,6 +116,8 @@ class UserUpdate(BaseModel):
     def role_is_valid(cls, value: str | None) -> str | None:
         return validate_role(value) if value is not None else value
 
+    _disabled_not_null = field_validator("disabled")(reject_null)
+
 
 class RoleInput(BaseModel):
     name: str = Field(min_length=1, max_length=64)
@@ -170,7 +181,7 @@ class IpPolicyUpdate(BaseModel):
 class GroupInput(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     parent_id: str | None = None
-    description: str = ""
+    description: str = Field(default="", max_length=_LONG_TEXT_MAX)
     azure_connection_id: str | None = None
     enabled: bool = True
     never_stop: bool = False
@@ -178,10 +189,12 @@ class GroupInput(BaseModel):
 
 class GroupPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=_LONG_TEXT_MAX)
     azure_connection_id: str | None = None
     enabled: bool | None = None
     never_stop: bool | None = None
+
+    _not_null = field_validator("name", "description", "enabled", "never_stop")(reject_null)
 
 
 class GroupMove(BaseModel):
@@ -198,7 +211,7 @@ class VmBulkAdd(BaseModel):
     vm_resource_ids: list[str] = Field(min_length=1, max_length=500)
     azure_connection_id: str | None = None
     enabled: bool = True
-    notes: str = ""
+    notes: str = Field(default="", max_length=_LONG_TEXT_MAX)
 
 
 class VmNameResolveInput(BaseModel):
@@ -206,6 +219,10 @@ class VmNameResolveInput(BaseModel):
 
     names: list[str] = Field(min_length=1, max_length=500)
     subscription_ids: list[str] = Field(default_factory=list)
+
+
+class VmDiscoveryInput(BaseModel):
+    subscription_id: str = Field(min_length=1, max_length=100)
 
 
 class VmLookupInput(BaseModel):
@@ -240,7 +257,9 @@ class VmPatch(BaseModel):
     azure_connection_id: str | None = None
     enabled: bool | None = None
     never_stop: bool | None = None
-    notes: str | None = None
+    notes: str | None = Field(default=None, max_length=_LONG_TEXT_MAX)
+
+    _not_null = field_validator("group_id", "display_name", "enabled", "never_stop", "notes")(reject_null)
 
 
 class VmBulkAction(BaseModel):
@@ -318,7 +337,7 @@ class ScheduleInput(BaseModel):
     start_time: str = ""
     cron_expression: str = Field(default="", max_length=200)
     weekday: int | None = Field(default=None, ge=0, le=6)
-    timezone: str | None = None
+    timezone: str | None = Field(default=None, max_length=100)
     start_date: str = Field(default="", max_length=10)
     end_date: str = Field(default="", max_length=10)
     run_limit: int | None = Field(default=None, ge=1, le=100_000)
@@ -327,7 +346,7 @@ class ScheduleInput(BaseModel):
     stagger_seconds: int = Field(default=0, ge=0, le=3600)
     azure_connection_id: str | None = None
     enabled: bool = True
-    notes: str = ""
+    notes: str = Field(default="", max_length=_LONG_TEXT_MAX)
 
 
 class SchedulePatch(BaseModel):
@@ -339,7 +358,7 @@ class SchedulePatch(BaseModel):
     start_time: str | None = None
     cron_expression: str | None = Field(default=None, max_length=200)
     weekday: int | None = Field(default=None, ge=0, le=6)
-    timezone: str | None = None
+    timezone: str | None = Field(default=None, max_length=100)
     start_date: str | None = Field(default=None, max_length=10)
     end_date: str | None = Field(default=None, max_length=10)
     run_limit: int | None = Field(default=None, ge=1, le=100_000)
@@ -348,7 +367,13 @@ class SchedulePatch(BaseModel):
     stagger_seconds: int | None = Field(default=None, ge=0, le=3600)
     azure_connection_id: str | None = None
     enabled: bool | None = None
-    notes: str | None = None
+    notes: str | None = Field(default=None, max_length=_LONG_TEXT_MAX)
+
+    _not_null = field_validator(
+        "name", "action", "stop_mode", "ring_order", "schedule_type", "start_time",
+        "cron_expression", "start_date", "end_date", "target_type", "target_id",
+        "stagger_seconds", "enabled", "notes",
+    )(reject_null)
 
 
 class RecurrencePreviewInput(BaseModel):
@@ -424,15 +449,15 @@ class CsvCommitRequest(BaseModel):
 
 
 class ConnectionInput(BaseModel):
-    id: str | None = None
+    id: str | None = Field(default=None, max_length=100)
     display_name: str = Field(min_length=1, max_length=200)
-    tenant_id: str = ""
+    tenant_id: str = Field(default="", max_length=100)
     auth_method: Literal["azure_cli", "default_chain", "service_principal", "service_principal_cert", "az_cli_token"] = "azure_cli"
-    client_id: str | None = None
-    client_secret: str | None = None
-    certificate_pem: str | None = None
-    access_token_json: str | None = None
-    default_subscription: str | None = None
+    client_id: str | None = Field(default=None, max_length=100)
+    client_secret: str | None = Field(default=None, max_length=_LONG_TEXT_MAX)
+    certificate_pem: str | None = Field(default=None, max_length=_CERTIFICATE_MAX)
+    access_token_json: str | None = Field(default=None, max_length=_CERTIFICATE_MAX)
+    default_subscription: str | None = Field(default=None, max_length=100)
     allow_vm_start: bool | None = None
     allow_vm_stop: bool | None = None
     read_only: bool | None = None

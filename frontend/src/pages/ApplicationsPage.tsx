@@ -19,7 +19,7 @@ function NextStart({ node, schedules }: { node: GroupNode; schedules: Schedule[]
   return <Chip tone="info" icon={<CalendarClock size={13} />} title={`Earliest of ${waves} schedule${waves === 1 ? '' : 's'} in this application`}>{countdown}</Chip>
 }
 
-function ApplicationCard({ node, schedules }: { node: GroupNode; schedules: Schedule[] }) {
+function ApplicationCard({ node, schedules, showVms, showSchedules }: { node: GroupNode; schedules: Schedule[]; showVms: boolean; showSchedules: boolean }) {
   const canWrite = useCan('groups.write')
   const client = useQueryClient()
   const [optimistic, setOptimistic] = useState<boolean | null>(null)
@@ -42,8 +42,8 @@ function ApplicationCard({ node, schedules }: { node: GroupNode; schedules: Sche
     </div>
     <div className="flex flex-wrap items-center gap-2">
       <Chip tone="neutral">{node.children?.length ?? 0} ring{(node.children?.length ?? 0) === 1 ? '' : 's'}</Chip>
-      <Chip tone="neutral" icon={<Server size={13} />}>{node.subtree_vm_count} VM{node.subtree_vm_count === 1 ? '' : 's'}</Chip>
-      <NextStart node={node} schedules={schedules} />
+      {showVms && <Chip tone="neutral" icon={<Server size={13} />}>{node.subtree_vm_count} VM{node.subtree_vm_count === 1 ? '' : 's'}</Chip>}
+      {showSchedules && <NextStart node={node} schedules={schedules} />}
       <Chip tone={enabled ? 'success' : 'neutral'}>{enabled ? 'Enabled' : 'Disabled'}</Chip>
     </div>
     <p className="truncate text-xs text-slate-500">Tenant: {connectionLabel(node.effective_connection_name ?? node.connection_name, node.effective_connection_tenant_id ?? node.connection_tenant_id)}{node.connection_inherited ? ' · inherited' : ''}</p>
@@ -54,8 +54,10 @@ function ApplicationCard({ node, schedules }: { node: GroupNode; schedules: Sche
 /** Root applications workspace: every top-level group with its rings, VM totals and next start. */
 export function ApplicationsPage() {
   const canWrite = useCan('groups.write')
+  const canReadVms = useCan('vms.read')
+  const canReadSchedules = useCan('schedules.read')
   const tree = useGroupTree()
-  const schedules = useScheduleIndex()
+  const schedules = useScheduleIndex(canReadSchedules)
   const [query, setQuery] = useState('')
   const [state, setState] = useState('')
   const [creating, setCreating] = useState(false)
@@ -70,7 +72,7 @@ export function ApplicationsPage() {
 
   const newButton = canWrite ? <button type="button" className="btn-primary" onClick={() => setCreating(true)}><Plus size={16} />New application</button> : undefined
   const headerActions = <div className="flex flex-wrap gap-2">
-    <Link to="/applications/locate" className="btn-secondary"><MapPin size={16} />Locate &amp; place VMs</Link>
+    {canReadVms && <Link to="/applications/locate" className="btn-secondary"><MapPin size={16} />Locate &amp; place VMs</Link>}
     {newButton}
   </div>
 
@@ -90,7 +92,7 @@ export function ApplicationsPage() {
         description={query || state ? 'Clear the search and filters to see every application.' : 'Create your first application, then add rings and virtual machines beneath it.'}
         action={newButton}
       /> : <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {applications.map((node) => <ApplicationCard key={node.id} node={node} schedules={schedules.data?.byTarget.get(node.id) ?? []} />)}
+        {applications.map((node) => <ApplicationCard key={node.id} node={node} schedules={schedules.data?.byTarget.get(node.id) ?? []} showVms={canReadVms} showSchedules={canReadSchedules} />)}
       </div>}
     <GroupEditorDrawer open={creating} onClose={() => setCreating(false)} parentId={null} />
   </>

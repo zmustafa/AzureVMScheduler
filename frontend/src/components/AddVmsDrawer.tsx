@@ -49,7 +49,7 @@ export function AddVmsDrawer({ open, onClose, groupId, groupName }: { open: bool
   const names = useMemo(() => splitVmNames(nameText), [nameText])
 
   const discover = useMutation({
-    mutationFn: () => api<DiscoveryResult>(`/connections/${connectionId}/vms?subscription_id=${encodeURIComponent(subscription.trim())}`),
+    mutationFn: () => api<DiscoveryResult>(`/connections/${connectionId}/vms`, json('POST', { subscription_id: subscription.trim() })),
     onSuccess: () => setSelected(new Set()),
   })
 

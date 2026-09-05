@@ -29,7 +29,7 @@ const AuditPage = lazy(() => import('./pages/AuditPage').then(m => ({ default: m
 
 /** Route-level permission gate; the sidebar hides the same entries. */
 function Require({ permission, children }: { permission: string; children: ReactElement }) {
-  return useCan(permission) ? children : <Navigate to="/" replace />
+  return useCan(permission) ? children : <Navigate to="/settings" replace />
 }
 
 export default function App() {
@@ -37,26 +37,26 @@ export default function App() {
     <Route path="/login" element={<LoginPage/>}/>
     <Route element={<ProtectedLayout/>}>
       <Route element={<Suspense fallback={<Loading/>}><Outlet/></Suspense>}>
-        <Route index element={<DashboardPage/>}/>
-        <Route path="applications" element={<ApplicationsPage/>}/>
-        <Route path="applications/locate" element={<LocateVmsPage/>}/>
-        <Route path="applications/:groupId" element={<GroupDetailPage/>}/>
-        <Route path="vms" element={<VmsPage/>}/>
-        <Route path="schedules" element={<SchedulesPage/>}/>
-        <Route path="schedules/:id" element={<ScheduleDetailPage/>}/>
-        <Route path="timeline" element={<TimelinePage/>}/>
-        <Route path="runs" element={<RunsPage/>}/>
-        <Route path="runs/:id" element={<RunDetailPage/>}/>
-        <Route path="import" element={<ImportPage/>}/>
+        <Route index element={<Require permission="dashboard.read"><DashboardPage/></Require>}/>
+        <Route path="applications" element={<Require permission="groups.read"><ApplicationsPage/></Require>}/>
+        <Route path="applications/locate" element={<Require permission="vms.read"><LocateVmsPage/></Require>}/>
+        <Route path="applications/:groupId" element={<Require permission="groups.read"><GroupDetailPage/></Require>}/>
+        <Route path="vms" element={<Require permission="vms.read"><VmsPage/></Require>}/>
+        <Route path="schedules" element={<Require permission="schedules.read"><SchedulesPage/></Require>}/>
+        <Route path="schedules/:id" element={<Require permission="schedules.read"><ScheduleDetailPage/></Require>}/>
+        <Route path="timeline" element={<Require permission="schedules.read"><TimelinePage/></Require>}/>
+        <Route path="runs" element={<Require permission="runs.read"><RunsPage/></Require>}/>
+        <Route path="runs/:id" element={<Require permission="runs.read"><RunDetailPage/></Require>}/>
+        <Route path="import" element={<Require permission="imports.write"><ImportPage/></Require>}/>
         <Route path="settings" element={<SettingsPage/>}/>
         <Route path="settings/access" element={<Require permission="users.manage"><AccessControlPage/></Require>}/>
         {/* Access control used to live at the top level; keep old links and bookmarks working. */}
         <Route path="access" element={<Navigate to="/settings/access" replace/>}/>
-        <Route path="settings/tenants" element={<TenantsPage/>}/>
+        <Route path="settings/tenants" element={<Require permission="connections.manage"><TenantsPage/></Require>}/>
         <Route path="settings/connectors" element={<Require permission="connectors.read"><ConnectorsPage/></Require>}/>
         <Route path="settings/notifications" element={<Require permission="notifications.read"><NotificationRulesPage/></Require>}/>
         <Route path="notifications/deliveries" element={<Require permission="notifications.read"><DeliveriesPage/></Require>}/>
-        <Route path="audit" element={<AuditPage/>}/>
+        <Route path="audit" element={<Require permission="audit.read"><AuditPage/></Require>}/>
       </Route>
     </Route>
     <Route path="*" element={<Navigate to="/" replace/>}/>

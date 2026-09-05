@@ -153,6 +153,8 @@ export function RunDetailPage() {
   const client = useQueryClient()
   const canRetry = useCan('schedules.write')
   const canSeeNotifications = useCan('notifications.read')
+  const canReadSchedules = useCan('schedules.read')
+  const canReadVms = useCan('vms.read')
   const { format } = useDisplayTimezone()
   const [failuresOnly, setFailuresOnly] = useState(false)
   const [confirming, setConfirming] = useState(false)
@@ -163,19 +165,19 @@ export function RunDetailPage() {
     refetchInterval: (query) => (query.state.data && isRunActive(query.state.data.run) ? 5_000 : false),
   })
 
-  const scheduleIndex = useScheduleIndex()
+  const scheduleIndex = useScheduleIndex(canReadSchedules)
   const run = detail.data?.run
   const schedule = useMemo(() => (run?.schedule_id ? (scheduleIndex.data?.items ?? []).find((item) => item.id === run.schedule_id) : undefined), [scheduleIndex.data, run?.schedule_id])
   const zone = schedule?.timezone
 
   const vms = useQuery({
     queryKey: ['schedule', run?.schedule_id, 'vms'],
-    enabled: !!run?.schedule_id,
+    enabled: !!run?.schedule_id && canReadSchedules && canReadVms,
     queryFn: () => api<{ vms: VirtualMachine[] }>(`/schedules/${run!.schedule_id}`).then((data) => data.vms),
   })
   const vmById = useMemo(() => new Map((vms.data ?? []).map((item) => [item.id, item])), [vms.data])
 
-  const attempts = detail.data?.attempts ?? []
+  const attempts = useMemo(() => detail.data?.attempts ?? [], [detail.data?.attempts])
   const failedAttempts = useMemo(() => attempts.filter((item) => FAILED_ATTEMPT_STATUSES.has(item.status)), [attempts])
   const { rows: visible, sort, toggle } = useClientSort(
     failuresOnly ? failedAttempts : attempts,
