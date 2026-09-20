@@ -13,7 +13,7 @@ with two independent safety gates standing between you and a real Azure power ac
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker Image](https://img.shields.io/badge/docker-zmustafa%2Fazure--vm--scheduler-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/zmustafa/azure-vm-scheduler)
 [![Python 3.12](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](backend/pyproject.toml)
-[![React 18](https://img.shields.io/badge/react-18-61DAFB?logo=react&logoColor=black)](frontend/package.json)
+[![React 19](https://img.shields.io/badge/react-19-61DAFB?logo=react&logoColor=black)](frontend/package.json)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
@@ -845,7 +845,7 @@ template authoring is required.
 | --- | --- |
 | Backend | Python 3.12+, FastAPI (lifespan startup), async SQLAlchemy 2, Pydantic v2, Alembic, Argon2, Fernet |
 | Database | PostgreSQL in Azure; SQLite at `.data/azureops.db` locally — the engine is chosen by `DATABASE_URL` |
-| Frontend | React 18, TypeScript, Vite, Tailwind CSS, React Router, TanStack Query |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS, React Router, TanStack Query |
 | Packaging | One container image: the built SPA is served by the FastAPI backend at the same origin |
 | Scheduler | In-process asyncio loop inside the FastAPI app, DB lease-based claiming |
 | Azure | `azure-identity` + ARM compute calls and Resource Graph, or a deterministic mock adapter |
@@ -917,6 +917,12 @@ the estate, and `/api/admin/export|import|reset-estate` do the same over the API
 Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [Code of Conduct](CODE_OF_CONDUCT.md). Good first steps: open an issue to discuss a change, keep PRs
 focused, and make sure the backend tests and the frontend build both pass.
+
+[CI](.github/workflows/ci.yml) tests SQLite and PostgreSQL, lints and builds the frontend, and
+smoke-tests the container. [CodeQL](.github/workflows/codeql.yml) scans Actions, JavaScript/TypeScript,
+and Python on every pull request targeting `main`, every push to `main`, and weekly. There are no
+path filters, so dependency-only updates receive the same three analyses as source changes.
+This uses GitHub's advanced setup; keep default setup disabled to avoid competing configurations.
 
 Found a vulnerability? Please follow [SECURITY.md](SECURITY.md) — don't open a public issue.
 
